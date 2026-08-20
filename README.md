@@ -163,7 +163,7 @@ The kit is published on this repo's
 ```bash
 curl -fLO https://github.com/coder903/ninfer/releases/latest/download/ninfer-3090-kit-v0.6.1-sm86.tar.gz
 curl -fLO https://github.com/coder903/ninfer/releases/latest/download/SHA256SUMS.txt
-shasum -a 256 -c SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt
 tar xzf ninfer-3090-kit-v0.6.1-sm86.tar.gz -C /root
 ```
 
