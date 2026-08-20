@@ -179,6 +179,7 @@ curl -H "Authorization: Bearer $NINFER_API_KEY" \
 | `ninfer build` | *(5090)* Compile `sm_120a` binaries on the current box from upstream source. |
 | `ninfer kit-pack` | *(5090)* Tar this box's binaries and download the kit to `dist/`. |
 | `ninfer log-build` | *(5090)* Tail the compile log. |
+| `ninfer bench [C,C,…]` | *(5090)* Measure decode throughput across concurrency levels. |
 
 `create` is `provision` plus renting, so a run that dies late — a timeout, a dropped SSH — can be
 finished with `ninfer provision` on the box you already paid for. On the 3090 that split does not
@@ -327,6 +328,42 @@ compile. They need the same runtime libraries the build had: `libavcodec`, `liba
 The binaries are Apache-2.0 and are **not** original work of this project — see
 [`3090/third_party/ninfer-3090/ATTRIBUTION.md`](3090/third_party/ninfer-3090/ATTRIBUTION.md) and
 [`5090/third_party/ninfer/ATTRIBUTION.md`](5090/third_party/ninfer/ATTRIBUTION.md).
+
+## Measured throughput
+
+`ninfer bench` runs on the box over localhost — no network in the number — and reports
+`ninfer-serve`'s own per-request figures rather than counting stream chunks. That distinction
+matters: MTP speculative decoding commits two to four tokens per round, so counting SSE deltas
+undercounts decode by roughly 4×.
+
+RTX 5090, Qwen3.6-27B NVFP4, 600 tokens per stream, `int8` KV, MTP-3 with `--lm-head-draft`:
+
+| Concurrency | Per-stream tok/s | Aggregate tok/s | MTP tok/round | Acceptance |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 180 | 180 | 2.7 | 57% |
+| 2 | 175 | 338 | 2.6 | 53% |
+| 4 | 170 | 649 | 2.7 | 57% |
+| 8 | 147 | **1,056** | 2.7 | 56% |
+
+Aggregate is total tokens over the wall time the burst occupied, computed from the requests
+themselves. The engine's own 5-second interval report is *not* used, because it averages in
+whatever idle time the window happens to span — at concurrency 1 that reads ~40% low, and at 8 it
+swings by a third depending on where the burst lands.
+
+**Sampling moves these numbers.** Acceptance, and therefore throughput, depends on how closely the
+draft head predicts the sampler. The server's non-thinking defaults are `temperature 0.70`,
+`top_p 0.80`, `presence_penalty 1.50`; sending `"temperature": 0` on the request instead:
+
+| | Acceptance | Per-stream tok/s |
+| --- | ---: | ---: |
+| Server default, C=1 | 52% | 172 |
+| Greedy, C=1 | **63%** | **194** |
+| Server default, C=8 | 56% | 148 |
+| Greedy, C=8 | **61%** | **155** |
+
+For reference, upstream publishes 202.4 tok/s at C=1 and 1,146.9 at C=8 for this profile, at
+68–69% acceptance, over 8,192-token generations. Shorter generations and a hotter sampler account
+for most of the gap.
 
 ## Verified on
 

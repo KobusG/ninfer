@@ -10,6 +10,7 @@
 #   ninfer offers   list the 5090s worth renting right now
 #   ninfer ssh      shell on the box
 #   ninfer log      tail the server log
+#   ninfer bench    measure decode throughput across concurrency levels
 #   ninfer build    compile sm_120a binaries on the current box
 #   ninfer kit-pack package this box's binaries and pull the tarball down here
 #   ninfer kit-url  download URL for the prebuilt binaries
@@ -545,6 +546,78 @@ PY
 }
 
 # --- commands ---------------------------------------------------------------
+# --- benchmark ---------------------------------------------------------------
+# Runs on the box over localhost, so no network is in the number, and reports
+# the ENGINE'S figures rather than the client's. Counting SSE deltas undercounts
+# badly: MTP commits two to four tokens per round, and ninfer-serve already logs
+# per-request decode rate, speculative acceptance and aggregate batch throughput.
+cmd_bench() {
+  need_instance
+  local url mid; url=$(endpoint); mid=$(served_model "$url")
+  [ -n "$mid" ] || die "server is not answering — try 'ninfer status'"
+  local list="${1:-1,2,4,8}" maxnew="${NINFER_BENCH_TOKENS:-600}"
+  step "benchmark — $mid, concurrency $list, $maxnew tokens per stream"
+  info "measured on the box over localhost; figures are ninfer-serve's own"
+  box "APIKEY=$(printf %q "$NINFER_API_KEY") MODEL=$(printf %q "$mid") LIST=$(printf %q "$list") MAXNEW=$(printf %q "$maxnew") python3 -" <<'PY'
+import datetime, json, os, re, threading, time, urllib.request
+
+KEY, MODEL = os.environ["APIKEY"], os.environ["MODEL"]
+MAXNEW = int(os.environ["MAXNEW"])
+LOG = "/root/serve.log"
+PROMPT = ("Write a detailed technical explanation of how paged KV caches work in a "
+          "transformer inference engine, covering block allocation, prefix reuse, "
+          "eviction and fragmentation. Be thorough and specific.")
+
+def fire(i):
+    body = json.dumps({"model": MODEL, "max_tokens": MAXNEW, "messages":
+        [{"role": "user", "content": "%s (variant %d)" % (PROMPT, i)}]}).encode()
+    req = urllib.request.Request("http://127.0.0.1:8080/v1/chat/completions", body,
+        {"Authorization": "Bearer " + KEY, "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=900).read()
+    except Exception as e:
+        print("    request %d failed: %s" % (i, e))
+
+print("    %-3s %12s %12s %12s %9s" % ("C", "per-stream", "aggregate", "MTP", "accept"))
+print("    %-3s %12s %12s %12s %9s" % ("", "tok/s", "tok/s", "tok/round", ""))
+for C in [int(x) for x in os.environ["LIST"].split(",")]:
+    at = os.path.getsize(LOG)
+    ths = [threading.Thread(target=fire, args=(i,)) for i in range(C)]
+    for t in ths: t.start()
+    for t in ths: t.join()
+    time.sleep(3)                      # let the last 'done' line land
+    with open(LOG, "rb") as f:
+        f.seek(at); new = f.read().decode("utf-8", "replace")
+    dec  = [float(x) for x in re.findall(r"\] done .*? decode=([0-9.]+)tok/s", new)]
+    spec = re.findall(r"speculative=mtp ([0-9.]+)tok/round \(([0-9.]+)%\)", new)
+    # Aggregate from the requests themselves, not the engine's 5s interval
+    # report. That window averages in whatever idle time it happens to span, so
+    # at C=1 it reads well under what the GPU was doing while it was doing it,
+    # and at C=8 it swings by a third depending on where the burst lands.
+    done = re.findall(r"^\[([0-9-]+ [0-9:.]+)\].*?\] done .*? gen=([0-9]+) .*? wall=([0-9.]+)s",
+                      new, re.M)
+    if not dec:
+        print("    %-3d  no completed requests appeared in the log" % C)
+        continue
+    agg = None
+    if len(done) >= C:
+        rows = []
+        for ts, gen, wall in done[-C:]:
+            end = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
+            rows.append((end - datetime.timedelta(seconds=float(wall)), end, int(gen)))
+        span = (max(r[1] for r in rows) - min(r[0] for r in rows)).total_seconds()
+        if span > 0:
+            agg = sum(r[2] for r in rows) / span
+    print("    %-3d %12.1f %12s %12.2f %9.1f%%" % (
+        C, sum(dec)/len(dec), "%.1f" % agg if agg else "—",
+        sum(float(a) for a, _ in spec)/len(spec) if spec else 0,
+        sum(float(b) for _, b in spec)/len(spec) if spec else 0))
+print()
+print("    per-stream is each request's own decode rate, as ninfer-serve reports it.")
+print("    aggregate is total tokens over the wall time the burst actually occupied.")
+PY
+}
+
 cmd_status() {
   [ -n "$INSTANCE" ] || { step "no instance"; info "run 'ninfer create' to rent one"; return; }
   local s url code
@@ -713,6 +786,7 @@ cmd_down() {
 case "${1:-status}" in
   create)    shift; cmd_create "${1:-}" ;;
   provision) cmd_provision ;;
+  bench)     shift; cmd_bench "${1:-}" ;;
   destroy|rm) cmd_destroy ;;
   up)        cmd_up ;;
   down|stop) cmd_down ;;
@@ -725,5 +799,5 @@ case "${1:-status}" in
   ssh)       shift; read -r h p < <(ssh_target); exec ssh "${SSH_OPTS[@]}" -p "$p" "root@$h" "$@" ;;
   log)       box 'tail -n 40 -f /root/serve.log' ;;
   log-build) box 'tail -n 40 -f /root/build.log' ;;
-  *)         sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *)         sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
