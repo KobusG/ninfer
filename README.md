@@ -155,11 +155,23 @@ The script fetches the tarball over a signed, time-limited URL and verifies it b
 unpacking. `NINFER_B2_ENV` and `NINFER_KIT_KEY` point at the storage holding it; `ninfer kit-url`
 prints the signed URL, and `ninfer restore` reinstalls onto a running box.
 
-> **Note:** the kit is currently served from a private bucket, so `ninfer create` will fail at
-> step 5 for anyone but the author. Publishing it as a GitHub Release is the next step — see
-> [issues](https://github.com/coder903/ninfer/issues). Until then, build from
-> [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) using their Linux guide and
-> repoint `NINFER_KIT_KEY` and `KIT_SHA1` at your own copy.
+### Download
+
+The kit is published on this repo's
+[**Releases**](https://github.com/coder903/ninfer/releases/latest) page:
+
+```bash
+curl -fLO https://github.com/coder903/ninfer/releases/latest/download/ninfer-3090-kit-v0.6.1-sm86.tar.gz
+curl -fLO https://github.com/coder903/ninfer/releases/latest/download/SHA256SUMS.txt
+shasum -a 256 -c SHA256SUMS.txt
+tar xzf ninfer-3090-kit-v0.6.1-sm86.tar.gz -C /root
+```
+
+That gives you `/root/kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA toolchain, no
+883-second build. `ninfer restore` does the same thing onto a box the CLI is already managing.
+
+The binaries are Apache-2.0 and are **not** original work of this project — see
+[`third_party/ninfer-3090/ATTRIBUTION.md`](third_party/ninfer-3090/ATTRIBUTION.md).
 
 ## Verified on
 
