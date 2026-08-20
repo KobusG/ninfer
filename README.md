@@ -93,51 +93,71 @@ work in it. Another card would be another sibling.
 
 ## Requirements
 
-- A [Vast.ai](https://vast.ai) account with credit and an SSH key registered
+- A [Vast.ai](https://vast.ai) account with credit and an SSH key registered on it
 - `bash`, `curl`, `python3`, `ssh` (macOS or Linux)
 - An SSH keypair at `~/.ssh/id_ed25519` (override with `NINFER_SSH_KEY`)
 
+Nothing needs to be installed on your machine beyond that — no CUDA, no Python packages, no
+Docker. Everything heavy happens on the rented box.
+
 ## Setup
+
+**Pick your card first.** Every command below runs from inside `3090/` or `5090/`, and the two
+never share state. Substitute whichever you have:
 
 ```bash
 git clone https://github.com/coder903/ninfer.git
 cd ninfer
-cp 3090/.env.example 3090/.env
+
+CARD=5090                                  # or 3090
+cp $CARD/.env.example $CARD/.env
 ```
 
-Fill in `3090/.env` — the script reads the `.env` sitting next to it:
+Fill in `$CARD/.env` — the script reads the `.env` sitting next to it, not one in the repo root:
 
 ```bash
 VAST_API_KEY=your-vast-api-key
 NINFER_API_KEY=any-string-you-choose      # the bearer token your clients will send
 ```
 
-Optionally put it on your `PATH`. Symlinks are resolved, so an installed link still finds its own
-`.env`:
+`NINFER_API_KEY` is yours to invent. It isn't issued by anybody — it's simply the key the served
+API will demand. `NINFER_BASE_URL` is written for you on every `create` and `up`; leave it blank.
+
+Optionally put the script on your `PATH`. Symlinks are resolved, so an installed link still finds
+its own `.env` and its own card:
 
 ```bash
-ln -s "$PWD/3090/ninfer" ~/.local/bin/ninfer
+ln -s "$PWD/5090/ninfer" ~/.local/bin/ninfer5090
+ln -s "$PWD/3090/ninfer" ~/.local/bin/ninfer3090
 ```
 
-`NINFER_API_KEY` is yours to invent — it's the key the served API will require. Then:
+Then:
 
 ```bash
-ninfer create
+cd $CARD
+./ninfer create
 ```
 
-Roughly two to eight minutes later you'll have an endpoint:
+A few minutes later you have an endpoint:
 
 ```
 ready — http://<ip>:<port>/v1
-  costing $0.2789/hr; 'ninfer destroy' when you're done
+  model:    qwen3_6_27b_nvfp4.ninfer (17.07 GiB, nvfp4-27b)
+  opencode: pick ninfer5090/qwen3.6-27b
+  costing $0.4296/hr; 'ninfer destroy' when you're done
 ```
 
-Which behaves like any OpenAI-compatible API:
+It behaves like any OpenAI-compatible API. **Send the model id the line above printed** — it is
+the artifact's own identity, and the two cards do not share one (`qwen3.6-27b` on the 5090,
+`qwen3.8-27b` on the 3090). `ninfer status` reprints it, and `GET /v1/models` is authoritative:
 
 ```bash
+source .env
+curl -H "Authorization: Bearer $NINFER_API_KEY" "$NINFER_BASE_URL/models"
+
 curl -H "Authorization: Bearer $NINFER_API_KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"hello"}]}' \
+     -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"hello"}]}' \
      "$NINFER_BASE_URL/chat/completions"
 ```
 
@@ -145,22 +165,44 @@ curl -H "Authorization: Bearer $NINFER_API_KEY" \
 
 | Command | What it does |
 | --- | --- |
-| `ninfer create [offer]` | Rent a fresh 3090 and provision it from scratch. Picks the cheapest qualifying offer, or takes an offer id. |
+| `ninfer create [offer]` | Rent a GPU and provision it. Picks the cheapest qualifying offer, or takes an offer id from `ninfer offers`. |
+| `ninfer status` | State, endpoint, hourly cost, model, health. |
 | `ninfer destroy` | Delete the instance entirely — idle cost goes to $0.00. |
-| `ninfer up` | Resume a **stopped** instance (~2 min, only if one exists). |
 | `ninfer down` | Stop an instance, keeping the disk. **Still bills for storage.** |
-| `ninfer status` | State, endpoint, hourly cost, health. |
-| `ninfer offers` | List the 3090s worth renting right now. |
+| `ninfer up` | Resume a stopped instance, or restart serving on a running one. |
+| `ninfer offers` | List the cards worth renting right now. |
 | `ninfer ssh [cmd]` | Shell on the box. |
 | `ninfer log` | Tail the server log. |
-| `ninfer kit-url` | Print a time-limited download URL for the prebuilt binaries. |
-| `ninfer restore` | Reinstall those binaries on the current box. |
+| `ninfer restore` | Reinstall the prebuilt binaries on the current box. |
+| `ninfer kit-url` | Print the URL the kit would be fetched from. |
+| `ninfer provision` | *(5090)* Finish a box that `create` left half-built, instead of renting another. |
+| `ninfer build` | *(5090)* Compile `sm_120a` binaries on the current box from upstream source. |
+| `ninfer kit-pack` | *(5090)* Tar this box's binaries and download the kit to `dist/`. |
+| `ninfer log-build` | *(5090)* Tail the compile log. |
+
+`create` is `provision` plus renting, so a run that dies late — a timeout, a dropped SSH — can be
+finished with `ninfer provision` on the box you already paid for. On the 3090 that split does not
+exist yet; a failed `create` there means destroying and starting over.
 
 ### down vs destroy
 
-`down` keeps the 60 GB disk and keeps billing you for it — around 4¢/hr, or roughly a dollar a
-day, forever. `destroy` costs nothing at all while idle, and because the binaries are cached
-off-box a rebuild is only a few minutes. **Unless you're coming back within the hour, destroy.**
+`down` keeps the disk and keeps billing you for it — around 4¢/hr, roughly a dollar a day,
+forever. `destroy` costs nothing at all while idle, and because the binaries come from a release
+and the model comes from Hugging Face at multi-gigabit speed, a rebuild is only a few minutes.
+**Unless you're coming back within the hour, destroy.**
+
+### When a host can't start
+
+Vast will occasionally rent you a machine whose own device map cannot hand the container its GPU:
+
+```
+failed to inject CDI devices: unresolvable CDI devices D.<hash>/gpu=0: unknown
+```
+
+Nothing in the offer listing predicts this — the two we hit scored 0.9951 and 0.9971 on
+reliability. The script reads Vast's `status_msg` rather than guessing, fails immediately instead
+of waiting out a timeout, and records the machine id in `.ninfer-badhosts` so `offers` and
+`create` skip it from then on. Delete a line from that file to give a machine another chance.
 
 ## Configuration
 
@@ -170,31 +212,67 @@ Everything has a sane default and an environment override:
 | --- | --- | --- |
 | `NINFER_PROJ` | script's directory | Where `.env` and instance state live |
 | `NINFER_SSH_KEY` | `~/.ssh/id_ed25519` | Key used to reach the box |
-| `NINFER_DISK` | `60` | Disk size in GB |
+| `NINFER_DISK` | `60` (3090) / `80` (5090) | Disk size in GB |
 | `NINFER_INSTANCE` | saved state file | Target a specific instance |
-| `NINFER_B2_ENV` | *(see below)* | Path to Backblaze B2 credentials for the prebuilt kit |
-| `NINFER_KIT_KEY` | `ninfer/ninfer-3090-kit-v0.6.1-sm86.tar.gz` | Object key of the kit |
+| `NINFER_MODEL` | `nvfp4-27b` | *(5090)* Which registered artifact to serve — see below |
+| `NINFER_PROVIDER` | `ninfer5090` | *(5090)* Provider key written into OpenCode config |
+| `NINFER_KIT_URL` | the published release | Where to fetch the kit |
+| `NINFER_KIT_SHA1` | the published kit's SHA-1 | Blank it to compile from source instead |
+| `NINFER_SRC_BRANCH` | `master` | *(5090)* Upstream branch `ninfer build` compiles |
+| `NINFER_B2_ENV` | *(unset)* | Path to Backblaze B2 credentials, if you host your own copy |
+| `NINFER_KIT_KEY` | *(unset)* | Object key of that private copy |
 
-Instance state is kept in `.ninfer-instance`. Both that file and `.env` are gitignored.
+Per-card state lives beside the script and is all gitignored: `.env`, `.ninfer-instance`,
+`.ninfer-badhosts`, and `dist/`.
+
+### Choosing a model (5090)
+
+Upstream accepts a closed set of artifacts and refuses everything else. Four of them fit in 32 GB:
+
+| `NINFER_MODEL` | Artifact | Size | Note |
+| --- | --- | --- | --- |
+| `nvfp4-27b` *(default)* | Qwen3.6-27B NVFP4 | 17.07 GiB | W4A4 tensor cores; 5.67× at concurrency 8 |
+| `int-27b` | Qwen3.6-27B `groupwise-int` | 16.29 GiB | 2.88× at concurrency 8 |
+| `qwen38-27b` | Qwen3.8-27B `groupwise-int` | 16.96 GiB | The same checkpoint the 3090 runs |
+| `moe-35b` | Qwen3.6-35B-A3B | 21.22 GiB | Fastest at concurrency 8; DFlash, text-only |
+
+Each is checked against upstream's published SHA-256 after download. One engine holds one resident
+artifact, so switching models means `destroy` and `create` again.
 
 ### OpenCode integration
 
-If you use [OpenCode](https://opencode.ai), `create` and `up` will rewrite the `baseURL` of a
-provider named `ninfer` in any config listed in the `CONFIGS` array, so the address change after
-a restart doesn't silently break your client. Configs that don't exist, or that have no `ninfer`
-provider, are skipped harmlessly. Adapt the array for other clients.
+If you use [OpenCode](https://opencode.ai), `create` and `up` rewrite your client config so the
+address change after a restart doesn't silently break it. The two cards behave differently, on
+purpose:
+
+- **5090** — owns the provider key `ninfer5090` and **writes the whole block** if it is missing,
+  reading the model id off `GET /v1/models` rather than assuming it. Then pick
+  `ninfer5090/<model-id>` in the TUI. Restart OpenCode; config is read at startup.
+- **3090** — updates the `baseURL` of an existing provider named `ninfer`, and skips a config that
+  doesn't define one.
+
+Edit the `CONFIGS` array near the top of the script to point at your own files, or at a different
+client entirely.
 
 ## How provisioning works
 
-1. **Pick** — query Vast's bundles API for single-3090 offers with enough disk, ≥1 Gbps down,
-   CUDA ≥13, ≥23 GB VRAM and `reliability2 ≥ 0.97`, then take the cheapest.
+`create` rents the box, then hands off to `provision`:
+
+1. **Pick** — query Vast's bundles API for single-GPU offers with enough disk, ≥1 Gbps down, a new
+   enough CUDA, enough VRAM, a reliability floor, and no entry in `.ninfer-badhosts`; take the
+   cheapest survivor.
 2. **Rent** — create the instance from `nvidia/cuda:13.1.2-devel-ubuntu24.04` with port 8080 mapped.
-3. **Wait for SSH** — the box has to be reachable before anything else happens.
-4. **Provision** — apt deps and an 18.2 GB checkpoint pulled from Hugging Face, detached so a
-   dropped connection doesn't kill it.
-5. **Install the kit** — prebuilt `sm_86` binaries, verified by SHA-1.
-6. **Serve** — launch under a supervisor loop that restarts on crash, wait for HTTP 200, then
+3. **Wait for SSH** — nothing else can happen until the box is reachable.
+4. **Provision** — apt dependencies and the checkpoint pulled from Hugging Face, detached so a
+   dropped connection doesn't kill it, then checksummed.
+5. **Install the binaries** — the prebuilt kit, verified by SHA-1. With `NINFER_KIT_SHA1` blank the
+   5090 compiles from upstream source here instead, which is what happened before a kit existed.
+6. **Wait** — for the model download to land.
+7. **Serve** — launch under a supervisor loop that restarts on crash, wait for HTTP 200, then
    rewrite client config with the new address.
+
+Steps 4 and 5 run concurrently on the box. Provisioning owns `apt`, and the compile waits on a
+marker file, because two `apt-get` runs at once deadlock on the dpkg lock.
 
 ## The prebuilt Linux kits
 
