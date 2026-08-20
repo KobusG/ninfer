@@ -49,6 +49,23 @@ people just leave the instance running, and the savings evaporate.
   on every start, so all three are re-resolved on every call. Client config is rewritten
   automatically when the address changes.
 
+## Layout
+
+The repo is laid out by GPU, because a build is only valid for the architecture it was compiled
+against. What ships here targets `sm_86` — Ampere — which is the 3090:
+
+```
+3090/
+├── ninfer            the CLI
+├── .env.example      credentials template
+└── third_party/      upstream Apache-2.0 license + attribution
+```
+
+Another card means a sibling directory with its own binaries and its own attribution — a `5090/`
+built for `sm_120` — rather than a flag on this one. Each directory is self-contained: the script
+resolves its own location, so `.env` and `.ninfer-instance` live beside the copy you run, and two
+cards never share state.
+
 ## Requirements
 
 - A [Vast.ai](https://vast.ai) account with credit and an SSH key registered
@@ -57,11 +74,24 @@ people just leave the instance running, and the savings evaporate.
 
 ## Setup
 
-Create a `.env` next to the script:
+```bash
+git clone https://github.com/coder903/ninfer.git
+cd ninfer
+cp 3090/.env.example 3090/.env
+```
+
+Fill in `3090/.env` — the script reads the `.env` sitting next to it:
 
 ```bash
 VAST_API_KEY=your-vast-api-key
 NINFER_API_KEY=any-string-you-choose      # the bearer token your clients will send
+```
+
+Optionally put it on your `PATH`. Symlinks are resolved, so an installed link still finds its own
+`.env`:
+
+```bash
+ln -s "$PWD/3090/ninfer" ~/.local/bin/ninfer
 ```
 
 `NINFER_API_KEY` is yours to invent — it's the key the served API will require. Then:
@@ -171,7 +201,7 @@ That gives you `/root/kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA to
 883-second build. `ninfer restore` does the same thing onto a box the CLI is already managing.
 
 The binaries are Apache-2.0 and are **not** original work of this project — see
-[`third_party/ninfer-3090/ATTRIBUTION.md`](third_party/ninfer-3090/ATTRIBUTION.md).
+[`3090/third_party/ninfer-3090/ATTRIBUTION.md`](3090/third_party/ninfer-3090/ATTRIBUTION.md).
 
 ## Verified on
 

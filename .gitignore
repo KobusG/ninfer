@@ -1,18 +1,16 @@
 # --- secrets & machine-local state -------------------------------------------
+# Unanchored, so these are ignored inside every card directory (3090/, 5090/...).
 .env
 .ninfer-instance
+
+# --- scratch work, not part of this project ----------------------------------
+# Local experiments that happen to share this checkout. Never published.
+sandbox/
 
 # --- python env / caches -----------------------------------------------------
 .venv/
 __pycache__/
 *.py[cod]
-
-# --- scratch work, not part of this project ----------------------------------
-# Flask experiment + odds and ends that happen to share this directory.
-temperature_app/
-run.py
-wsgi.py
-fibonacci.py
 
 # --- macOS -------------------------------------------------------------------
 .DS_Store
