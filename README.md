@@ -1,37 +1,56 @@
 # ninfer
 
-**A prebuilt Linux build of the NInfer RTX 3090 engine — the one thing upstream doesn't ship —
-plus a single bash script that rents the GPU to run it on.**
+**Prebuilt Linux builds of the NInfer inference engine — the thing upstream doesn't ship — plus a
+single bash script that rents the GPU to run one on and tears it down when you're done.**
 
-Upstream ships a ready-to-run archive for Windows. Linux users get a Dockerfile and a
-"build it yourself" guide. In their own words, from
+NInfer is a from-scratch C++/CUDA engine that runs a closed set of registered Qwen checkpoints
+faster than a general-purpose runtime does. There are two of them, one per GPU generation, and
+neither publishes what a Linux user actually needs:
+
+| Project | Linux binaries | Windows binaries |
+| --- | --- | --- |
+| [Neroued/ninfer](https://github.com/Neroued/ninfer) — the RTX 5090 engine | none, ever | none, ever |
+| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) — the RTX 3090 backport | none since v0.3.1 | prebuilt archive |
+| **this project** | **`sm_86` v0.6.1 for the 3090** | — (use upstream) |
+
+Both say so themselves. The 3090 fork, in
 [`RELEASE_NOTES_0.6.1.md`](https://github.com/Don-Chad/ninfer-3090/blob/main/RELEASE_NOTES_0.6.1.md):
 
 > The project does not publish a prebuilt Linux archive.
 
-This project closes that gap. It provides `sm_86` Linux binaries for **v0.6.1-rtx3090**, and a
-CLI that rents an RTX 3090 on [Vast.ai](https://vast.ai), provisions it, serves an
-OpenAI-compatible API, and tears it all down so idle cost is **$0.00/hr**.
+And the 5090 project, which goes further — it has no releases and no tags at all:
+
+> There is no install target or packaged binary distribution; NInfer is run from its source build
+> tree.
+
+So the 3090 gap is Linux-shaped. The 5090 gap is every-platform-shaped: the only way to run it is
+to compile it yourself on a machine that already has the card.
 
 ```
-ninfer create     # rent a 3090 and provision it (~2-8 min)
+ninfer create     # rent a GPU and provision it
 ninfer status     # state, endpoint, hourly cost, health
 ninfer destroy    # delete it — idle cost goes to $0.00
 ```
 
-## Platform support, upstream vs here
+## Which card
 
-| | Linux | Windows |
+| | `3090/` | `5090/` |
 | --- | --- | --- |
-| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Docker or source build only | Prebuilt archive |
-| **this project** | **Prebuilt `sm_86` archive, v0.6.1** | — (use upstream) |
+| Architecture | `sm_86`, Ampere, 24 GB | `sm_120a`, Blackwell, 32 GB |
+| Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` |
+| Default model | Qwen3.8-27B `groupwise-int` | Qwen3.6-27B **NVFP4** |
+| Binaries | prebuilt, downloaded in seconds | compiled on the box on first run |
+| Typical rent | ~$0.28/hr | ~$0.40–0.70/hr |
 
-Upstream's last release carrying a Linux tarball was **v0.3.1**. Every release since — v0.4.0,
-v0.5.0, v0.6.0 — ships Windows binaries only. This build tracks **v0.6.1**.
+NVFP4 is the 5090's default because W4A4 tensor cores are the one thing a 3090 physically cannot
+do. Upstream measures that profile at 1,146.9 aggregate decode tok/s across eight concurrent
+requests — **5.67×** its single-request throughput, where the integer profile manages 2.88×. Set
+`NINFER_MODEL=qwen38-27b` to run the same checkpoint the 3090 runs, if you want the comparison
+without the variable.
 
-Upstream also notes that their Linux validation ran without a real model artifact, so no Linux
-throughput figures were published. These binaries have been run against the real 18.2 GB
-Qwen3.8-27B checkpoint on Ubuntu 24.04 — see [Verified on](#verified-on) below.
+Upstream's 3090 notes also mention that their Linux validation ran without a real model artifact,
+so no Linux throughput figures were published. These binaries have been run against the real
+18.2 GB Qwen3.8-27B checkpoint on Ubuntu 24.04 — see [Verified on](#verified-on) below.
 
 ## Why rent, instead of leaving it running
 
@@ -52,19 +71,23 @@ people just leave the instance running, and the savings evaporate.
 ## Layout
 
 The repo is laid out by GPU, because a build is only valid for the architecture it was compiled
-against. What ships here targets `sm_86` — Ampere — which is the 3090:
+against, and the two cards do not even share an upstream:
 
 ```
-3090/
+3090/                 sm_86  · Ampere  · Don-Chad/ninfer-3090 v0.6.1
 ├── ninfer            the CLI
 ├── .env.example      credentials template
 └── third_party/      upstream Apache-2.0 license + attribution
+
+5090/                 sm_120a · Blackwell · Neroued/ninfer master
+├── ninfer            the CLI, same shape, different everything else
+├── .env.example
+└── third_party/
 ```
 
-Another card means a sibling directory with its own binaries and its own attribution — a `5090/`
-built for `sm_120` — rather than a flag on this one. Each directory is self-contained: the script
-resolves its own location, so `.env` and `.ninfer-instance` live beside the copy you run, and two
-cards never share state.
+Each directory is self-contained: the script resolves its own location, so `.env` and
+`.ninfer-instance` live beside the copy you run, and the two cards never share state. Pick one,
+work in it. Another card would be another sibling.
 
 ## Requirements
 

@@ -110,11 +110,19 @@ box() {
 }
 
 wait_for() {
-  local want="$1" limit="$2" waited=0 s
+  local want="$1" limit="$2" waited=0 s msg
   while :; do
-    s=$(field actual_status || true)
+    # One call for both fields. Vast puts the real reason a box will not start
+    # into status_msg — a broken CDI device map, a dead GPU — and it lands there
+    # within a minute. Polling only actual_status means sitting out the whole
+    # timeout and then reporting "still 'created'", which explains nothing.
+    read -r s msg < <(api_get | python3 -c '
+import sys, json
+d = json.load(sys.stdin)["instances"]
+print(d.get("actual_status") or "?", " ".join((d.get("status_msg") or "").split())[:300])' || echo "? ")
     [ "$s" = "$want" ] && { info "status: $s (${waited}s)"; return 0; }
-    [ "$waited" -ge "$limit" ] && die "timed out after ${limit}s waiting for '$want' (still '$s')"
+    case "$msg" in *Error*) printf '\n'; die "vast could not start this box: $msg" ;; esac
+    [ "$waited" -ge "$limit" ] && { printf '\n'; die "timed out after ${limit}s waiting for '$want' (still '$s')${msg:+ — vast says: $msg}"; }
     printf '\r  waiting… %s (%ds)   ' "${s:-?}" "$waited"; sleep 5; waited=$((waited+5))
   done
 }
@@ -309,9 +317,14 @@ cmd_create() {
 
   step "2/6  renting it"
   local resp new
-  resp=$(curl -fsS -X PUT -H "Authorization: Bearer $VAST_API_KEY" -H "Content-Type: application/json" \
+  # No -f here. Vast explains a refusal in the response body, and -f throws the
+  # body away, so a rejected offer used to surface as a bare "curl: (56) ... 400".
+  local code
+  resp=$(curl -sS -w '\n%{http_code}' -X PUT -H "Authorization: Bearer $VAST_API_KEY" -H "Content-Type: application/json" \
     -d "{\"client_id\":\"me\",\"image\":\"$IMAGE\",\"disk\":$DISK_GB,\"label\":\"$LABEL\",\"runtype\":\"ssh\",\"onstart\":\"\",\"env\":{\"-p 8080:8080\":\"1\"}}" \
     "$API_BASE/asks/${offer}/")
+  code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+  [ "$code" = 200 ] || die "vast refused offer $offer (HTTP $code): $(printf '%s' "$resp" | head -c 400)"
   new=$(printf '%s' "$resp" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)

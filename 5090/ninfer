@@ -36,6 +36,10 @@ CONFIGS=(
   "$HOME/.config/opencode/opencode.json"
   "$HOME/.config-opencode-ninfer/opencode/opencode.json"
 )
+# Which provider key in those configs this card owns. Separate from the 3090's
+# "ninfer" entry on purpose: the two serve different artifacts under different
+# model ids, and only one is ever live.
+PROVIDER="${NINFER_PROVIDER:-ninfer5090}"
 
 # What a fresh box gets built from. Upstream rejects any CUDA older than 13.1
 # and any architecture other than 120a, so the devel image and the offer filter
@@ -138,11 +142,19 @@ box() {
 }
 
 wait_for() {
-  local want="$1" limit="$2" waited=0 s
+  local want="$1" limit="$2" waited=0 s msg
   while :; do
-    s=$(field actual_status || true)
+    # One call for both fields. Vast puts the real reason a box will not start
+    # into status_msg — a broken CDI device map, a dead GPU — and it lands there
+    # within a minute. Polling only actual_status means sitting out the whole
+    # timeout and then reporting "still 'created'", which explains nothing.
+    read -r s msg < <(api_get | python3 -c '
+import sys, json
+d = json.load(sys.stdin)["instances"]
+print(d.get("actual_status") or "?", " ".join((d.get("status_msg") or "").split())[:300])' || echo "? ")
     [ "$s" = "$want" ] && { info "status: $s (${waited}s)"; return 0; }
-    [ "$waited" -ge "$limit" ] && die "timed out after ${limit}s waiting for '$want' (still '$s')"
+    case "$msg" in *Error*) printf '\n'; die "vast could not start this box: $msg" ;; esac
+    [ "$waited" -ge "$limit" ] && { printf '\n'; die "timed out after ${limit}s waiting for '$want' (still '$s')${msg:+ — vast says: $msg}"; }
     printf '\r  waiting… %s (%ds)   ' "${s:-?}" "$waited"; sleep 5; waited=$((waited+5))
   done
 }
@@ -203,23 +215,49 @@ if not ok: print("  none right now — 5090s with CUDA 13.1 are a thin slice of 
 
 # --- opencode config --------------------------------------------------------
 repoint() {
-  local url="$1" cfg
+  local url="$1" mid="${2:-}" cfg
   for cfg in "${CONFIGS[@]}"; do
     [ -f "$cfg" ] || { info "skip (missing): $cfg"; continue; }
-    python3 - "$cfg" "$url" <<'PY'
-import json, sys, collections
-cfg, url = sys.argv[1], sys.argv[2]
+    PROVIDER="$PROVIDER" python3 - "$cfg" "$url" "$mid" <<'PY'
+import json, sys, os, collections
+cfg, url, mid = sys.argv[1], sys.argv[2], sys.argv[3]
+key = os.environ["PROVIDER"]
 d = json.load(open(cfg), object_pairs_hook=collections.OrderedDict)
-prov = (d.get("provider") or {}).get("ninfer")
-if not prov:
-    print("  no 'ninfer' provider in %s — skipped" % cfg); raise SystemExit
-old = prov.setdefault("options", {}).get("baseURL")
-if old == url:
-    print("  unchanged: %s" % cfg); raise SystemExit
-prov["options"]["baseURL"] = url
+provs = d.setdefault("provider", collections.OrderedDict())
+fresh = key not in provs
+prov = provs.setdefault(key, collections.OrderedDict())
+
+prov["npm"] = "@ai-sdk/openai-compatible"
+prov.setdefault("name", "NInfer RTX 5090")
+opts = prov.setdefault("options", collections.OrderedDict())
+old = opts.get("baseURL")
+opts["baseURL"] = url
+opts.setdefault("apiKey", "{env:NINFER_API_KEY}")
+
+# One engine holds one resident artifact, so any other model id listed here is
+# left over from a run with a different NINFER_MODEL and would only ever 400.
+models = prov.setdefault("models", collections.OrderedDict())
+if mid and list(models) != [mid]:
+    models.clear()
+    models[mid] = collections.OrderedDict([
+        ("name", "%s [NInfer 5090]" % mid),
+        ("model", mid),
+        ("limit", collections.OrderedDict([("context", 32768), ("output", 8192)])),
+    ])
+
 json.dump(d, open(cfg, "w"), indent=2); open(cfg, "a").write("\n")
-print("  updated:   %s" % cfg)
-print("             %s -> %s" % (old, url))
+if fresh:
+    print("  created:   %s" % cfg)
+    print("             provider %r -> %s" % (key, url))
+elif old != url:
+    print("  updated:   %s" % cfg)
+    print("             %s -> %s" % (old, url))
+else:
+    print("  unchanged: %s" % cfg)
+if mid:
+    print("             model %s/%s" % (key, mid))
+else:
+    print("             server named no model - set one by hand")
 PY
   done
   python3 - "$url" <<'PY'
@@ -235,6 +273,22 @@ PY
 
 health() { curl -s -m 15 -o /dev/null -w '%{http_code}' \
            -H "Authorization: Bearer $NINFER_API_KEY" "$1/models" || echo 000; }
+
+# Upstream advertises the loaded container's own identity.model_id unless
+# --model-id overrides it, and the four artifacts do not share one. Read it off
+# the server instead of guessing, so the config can never disagree with what is
+# actually resident.
+served_model() {
+  curl -fsS -m 15 -H "Authorization: Bearer $NINFER_API_KEY" "$1/models" 2>/dev/null \
+  | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+ids = [m.get("id") for m in (d.get("data") or []) if m.get("id")]
+print(ids[0] if ids else "")' || true
+}
 
 # --- kit --------------------------------------------------------------------
 kit_url() {
@@ -463,9 +517,11 @@ PY
   info "serving (${waited}s)"
 
   step "re-pointing OpenCode"
-  repoint "$url"
+  local mid; mid=$(served_model "$url")
+  repoint "$url" "$mid"
   step "ready — $url"
-  info "model: $HF_FILE (${MODEL_GIB} GiB, $MODEL_KEY)"
+  info "model:    $HF_FILE (${MODEL_GIB} GiB, $MODEL_KEY)"
+  [ -n "$mid" ] && info "opencode: pick $PROVIDER/$mid"
   info "costing \$$(printf '%.4f' "$(field dph_total)")/hr; 'ninfer destroy' when you're done"
 }
 
@@ -506,9 +562,14 @@ cmd_create() {
 
   step "2/$total  renting it"
   local resp new
-  resp=$(curl -fsS -X PUT -H "Authorization: Bearer $VAST_API_KEY" -H "Content-Type: application/json" \
+  # No -f here. Vast explains a refusal in the response body, and -f throws the
+  # body away, so a rejected offer used to surface as a bare "curl: (56) ... 400".
+  local code
+  resp=$(curl -sS -w '\n%{http_code}' -X PUT -H "Authorization: Bearer $VAST_API_KEY" -H "Content-Type: application/json" \
     -d "{\"client_id\":\"me\",\"image\":\"$IMAGE\",\"disk\":$DISK_GB,\"label\":\"$LABEL\",\"runtype\":\"ssh\",\"onstart\":\"\",\"env\":{\"-p 8080:8080\":\"1\"}}" \
     "$API_BASE/asks/${offer}/")
+  code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+  [ "$code" = 200 ] || die "vast refused offer $offer (HTTP $code): $(printf '%s' "$resp" | head -c 400)"
   new=$(printf '%s' "$resp" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
