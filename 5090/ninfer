@@ -2,6 +2,7 @@
 # ninfer — run Qwen3.6-27B NVFP4 on a rented Vast.ai RTX 5090, and pay nothing when idle.
 #
 #   ninfer create   rent a fresh 5090 and provision it from scratch
+#   ninfer provision finish a box that create left half-built
 #   ninfer destroy  delete the instance entirely — idle cost goes to $0.00
 #   ninfer up       resume a STOPPED instance (~2 min, only if one exists)
 #   ninfer down     stop an instance (keeps the disk, still bills for it)
@@ -31,6 +32,7 @@ SELF="$SELF_DIR/${_src##*/}"   # absolute — usage is printed after cd "$PROJ"
 
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
 STATE="$PROJ/.ninfer-instance"
+BADHOSTS="$PROJ/.ninfer-badhosts"   # machines that failed to start; skipped by pick_offer
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 CONFIGS=(
   "$HOME/.config/opencode/opencode.json"
@@ -96,10 +98,16 @@ API_BASE="https://console.vast.ai/api/v0"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$SSH_KEY")
 
+bad_machines() { [ -f "$BADHOSTS" ] && cut -d' ' -f1 "$BADHOSTS" | paste -sd, - || true; }
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need_instance() { [ -n "$INSTANCE" ] || die "no instance — run 'ninfer create'"; }
+
+# Step banners. create() runs three of its own and then hands off to provision,
+# which runs four more; standalone provision numbers them 1..4.
+STEP_BASE=0; STEP_TOTAL=4; STEP_N=0
+pstep() { STEP_N=$((STEP_N+1)); step "$((STEP_BASE+STEP_N))/$STEP_TOTAL  $*"; }
 have_kit() { [ -n "$KIT_SHA1" ] && { [ -n "$KIT_RELEASE_URL" ] || [ -n "$KIT_KEY" ]; }; }
 
 # --- vast api ---------------------------------------------------------------
@@ -153,7 +161,17 @@ import sys, json
 d = json.load(sys.stdin)["instances"]
 print(d.get("actual_status") or "?", " ".join((d.get("status_msg") or "").split())[:300])' || echo "? ")
     [ "$s" = "$want" ] && { info "status: $s (${waited}s)"; return 0; }
-    case "$msg" in *Error*) printf '\n'; die "vast could not start this box: $msg" ;; esac
+    case "$msg" in *Error*)
+      printf '\n'
+      # Remember the machine. A host whose CDI device map cannot resolve its own
+      # GPU will do it again, and the offer list will happily hand it back.
+      local m; m=$(field machine_id 2>/dev/null || true)
+      if [ -n "$m" ] && ! grep -q "^$m " "$BADHOSTS" 2>/dev/null; then
+        printf '%s  %s  %s\n' "$m" "$(date -u +%F)" "$(printf '%s' "$msg" | cut -c1-90)" >> "$BADHOSTS"
+        info "machine $m recorded in $(basename "$BADHOSTS") — pick_offer will skip it"
+      fi
+      die "vast could not start this box: $msg" ;;
+    esac
     [ "$waited" -ge "$limit" ] && { printf '\n'; die "timed out after ${limit}s waiting for '$want' (still '$s')${msg:+ — vast says: $msg}"; }
     printf '\r  waiting… %s (%ds)   ' "${s:-?}" "$waited"; sleep 5; waited=$((waited+5))
   done
@@ -180,6 +198,7 @@ wait_ssh() {
 OFFER_FILTER='
 import sys, json, os
 disk = float(os.environ.get("DISK", "80"))
+bad = {t for t in os.environ.get("BAD", "").split(",") if t}
 cuda = float(os.environ.get("CUDA_MIN", "13.1"))
 o = json.load(sys.stdin).get("offers", [])
 ok = [x for x in o
@@ -187,7 +206,8 @@ ok = [x for x in o
       and (x.get("inet_down") or 0) >= 1000
       and (x.get("reliability2") or 0) >= 0.995
       and (x.get("cuda_max_good") or 0) >= cuda
-      and (x.get("gpu_ram") or 0) >= 31000]
+      and (x.get("gpu_ram") or 0) >= 31000
+      and str(x.get("machine_id")) not in bad]
 ok.sort(key=lambda x: x["dph_total"])
 '
 
@@ -195,7 +215,7 @@ OFFER_Q='{"gpu_name":{"eq":"RTX 5090"},"num_gpus":{"eq":1},"rentable":{"eq":true
 
 pick_offer() {  # echoes: id dph down loc
   curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
+  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
 if not ok: sys.exit("no offer matches (need >=%dGB disk, >=1Gbps, CUDA %s+, reliability >=0.995)" % (disk, cuda))
 x = ok[0]
 print(x["id"], "%.4f" % x["dph_total"], "%.0f" % (x.get("inet_down") or 0), x.get("geolocation"))'
@@ -204,7 +224,7 @@ print(x["id"], "%.4f" % x["dph_total"], "%.0f" % (x.get("inet_down") or 0), x.ge
 cmd_offers() {
   step "rentable RTX 5090s (>= ${DISK_GB}+10 GB disk, >= 1 Gbps, CUDA ${CUDA_MIN}+, reliability >= 0.995)"
   curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
+  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
 print("  %-9s %8s %11s %9s %6s  %s" % ("offer", "gpu/hr", "stor/GB/mo", "down", "rel", "location"))
 for x in ok[:10]:
     print("  %-9s $%.4f  $%9.4f %6.0fMb %6.4f  %s" % (
@@ -549,9 +569,7 @@ cmd_create() {
   [ -n "$INSTANCE" ] && [ "$(field actual_status 2>/dev/null || true)" != "" ] && \
     die "instance $INSTANCE already exists — 'ninfer up' to resume it, or 'ninfer destroy' first"
 
-  local total=6; have_kit || total=7
-
-  step "1/$total  picking a 5090"
+  step "1/3  picking a 5090"
   local offer dph down loc
   if [ -n "${1:-}" ]; then
     offer="$1"; dph="?"; down="?"; loc="(chosen by hand — see 'ninfer offers')"
@@ -560,7 +578,7 @@ cmd_create() {
   fi
   info "offer $offer — \$$dph/hr — ${down} Mbps down — $loc"
 
-  step "2/$total  renting it"
+  step "2/3  renting it"
   local resp new
   # No -f here. Vast explains a refusal in the response body, and -f throws the
   # body away, so a rejected offer used to surface as a bare "curl: (56) ... 400".
@@ -578,12 +596,24 @@ print(d["new_contract"])')
   [ -n "$new" ] || die "no contract id returned"
   INSTANCE="$new"; printf '%s\n' "$new" > "$STATE"
   info "instance $INSTANCE (saved to $STATE)"
-  wait_for running 420
+  wait_for running 900
 
-  step "3/$total  waiting for ssh"
+  step "3/3  waiting for ssh"
   wait_ssh
 
-  step "4/$total  provisioning (deps + ${MODEL_GIB} GiB model, detached — this is the long part)"
+  STEP_BASE=3 STEP_TOTAL=7 cmd_provision
+}
+
+# Everything after the box exists. Split out of create so a run that dies late
+# -- a timeout, a dropped ssh -- can be finished on the box already paid for
+# instead of destroying it and renting another.
+cmd_provision() {
+  need_instance
+  # Cheap when create just did this a second ago, and it is what makes the
+  # command safe to run on its own against a box that is still coming up.
+  [ "$(field actual_status)" = running ] || wait_for running 900
+  box true 2>/dev/null || wait_ssh
+  pstep "provisioning (deps + ${MODEL_GIB} GiB model, detached — this is the long part)"
   { printf 'HF_REPO=%q\nHF_FILE=%q\nMODEL_SHA=%q\n' "$HF_REPO" "$HF_FILE" "$MODEL_SHA"; cat <<'EOS'
 cat > /root/provision-ninfer.sh <<INNER
 #!/usr/bin/env bash
@@ -622,15 +652,15 @@ EOS
   } | box 'bash -s'
 
   if have_kit; then
-    step "5/$total  installing the prebuilt binaries"
+    pstep "installing the prebuilt binaries"
     install_kit
   else
-    step "5/$total  no prebuilt kit — compiling from source"
+    pstep "no prebuilt kit — compiling from source"
     info "upstream ships no binaries, so the first run on a box builds them"
     cmd_build
   fi
 
-  info "waiting on the model download…"
+  pstep "waiting on the model download"
   local waited=0
   until box 'grep -q PROVISION_DONE /root/provision.log' 2>/dev/null; do
     box 'grep -q "SHA MISMATCH" /root/provision.log' 2>/dev/null && die "model failed its checksum — ninfer ssh, then: tail /root/provision.log"
@@ -640,7 +670,7 @@ EOS
   done
   info "provisioned (${waited}s)"
 
-  step "$total/$total  bringing up the server"
+  pstep "bringing up the server"
   ensure_serving
 }
 
@@ -683,6 +713,7 @@ cmd_down() {
 
 case "${1:-status}" in
   create)    shift; cmd_create "${1:-}" ;;
+  provision) cmd_provision ;;
   destroy|rm) cmd_destroy ;;
   up)        cmd_up ;;
   down|stop) cmd_down ;;
@@ -695,5 +726,5 @@ case "${1:-status}" in
   ssh)       shift; read -r h p < <(ssh_target); exec ssh "${SSH_OPTS[@]}" -p "$p" "root@$h" "$@" ;;
   log)       box 'tail -n 40 -f /root/serve.log' ;;
   log-build) box 'tail -n 40 -f /root/build.log' ;;
-  *)         sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *)         sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

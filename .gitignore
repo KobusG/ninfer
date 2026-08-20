@@ -2,6 +2,7 @@
 # Unanchored, so these are ignored inside every card directory (3090/, 5090/...).
 .env
 .ninfer-instance
+.ninfer-badhosts
 
 # --- scratch work, not part of this project ----------------------------------
 # Local experiments that happen to share this checkout. Never published.
