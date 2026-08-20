@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# ninfer — run Qwen3.8-27B on a rented Vast.ai RTX 3090, and pay nothing when idle.
+# ninfer — run Qwen3.6-27B NVFP4 on a rented Vast.ai RTX 5090, and pay nothing when idle.
 #
-#   ninfer create   rent a fresh 3090 and provision it from scratch (~6-8 min)
+#   ninfer create   rent a fresh 5090 and provision it from scratch
 #   ninfer destroy  delete the instance entirely — idle cost goes to $0.00
 #   ninfer up       resume a STOPPED instance (~2 min, only if one exists)
 #   ninfer down     stop an instance (keeps the disk, still bills for it)
 #   ninfer status   state, endpoint, hourly cost, health
-#   ninfer offers   list the 3090s worth renting right now
+#   ninfer offers   list the 5090s worth renting right now
 #   ninfer ssh      shell on the box
 #   ninfer log      tail the server log
-#   ninfer kit-url  1-hour download URL for the prebuilt binaries on B2
+#   ninfer build    compile sm_120a binaries on the current box
+#   ninfer kit-pack package this box's binaries and pull the tarball down here
+#   ninfer kit-url  download URL for the prebuilt binaries, once one exists
 #   ninfer restore  reinstall those binaries on the current box
 #
 # Nothing about the address is stable: Vast reassigns the public IP, the mapped
@@ -35,23 +37,48 @@ CONFIGS=(
   "$HOME/.config-opencode-ninfer/opencode/opencode.json"
 )
 
-# What a fresh box gets built from.
+# What a fresh box gets built from. Upstream rejects any CUDA older than 13.1
+# and any architecture other than 120a, so the devel image and the offer filter
+# below are both load-bearing, not preferences.
 IMAGE="nvidia/cuda:13.1.2-devel-ubuntu24.04"
-DISK_GB="${NINFER_DISK:-60}"
-LABEL="ninfer-3090-qwen38"
-HF_REPO="neroued/Qwen3.8-27B-NInfer"
-HF_FILE="qwen3_8_27b.ninfer"
+CUDA_MIN=13.1
+ARCH=120a
+DISK_GB="${NINFER_DISK:-80}"
+SRC_REPO="https://github.com/Neroued/ninfer.git"
+SRC_BRANCH="${NINFER_SRC_BRANCH:-master}"
+APPS=/root/ninfer-5090/build-sm120a/apps
 ARGV_FILE=/root/ninfer-argv-new.txt
 SUPERVISE=/root/ninfer-supervise.sh
 
-# Prebuilt sm_86 binaries on Backblaze B2 — skips the 883s compile.
-# Borrowing the awakedesk bucket + key for now; repoint these at the dedicated
-# bucket when it exists and nothing else changes.
+# Upstream accepts a closed set of artifacts and nothing else. These are the
+# four worth running on 32 GB, with the size and SHA-256 upstream publishes for
+# each. NVFP4 is the default because it is the one thing a 5090 can do that a
+# 3090 physically cannot — W4A4 tensor cores — and it scales 5.67x from one
+# concurrent request to eight, where the int profile manages 2.88x.
+case "${NINFER_MODEL:-nvfp4-27b}" in
+  nvfp4-27b)  HF_REPO=neroued/Qwen3.6-27B-nvfp4-NInfer; HF_FILE=qwen3_6_27b_nvfp4.ninfer
+              MODEL_SHA=bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a; MODEL_GIB=17.07 ;;
+  int-27b)    HF_REPO=neroued/Qwen3.6-27B-NInfer;       HF_FILE=qwen3_6_27b.ninfer
+              MODEL_SHA=7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b; MODEL_GIB=16.29 ;;
+  qwen38-27b) HF_REPO=neroued/Qwen3.8-27B-NInfer;       HF_FILE=qwen3_8_27b.ninfer
+              MODEL_SHA=eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e; MODEL_GIB=16.96 ;;
+  moe-35b)    HF_REPO=neroued/Qwen3.6-35B-A3B-NInfer;   HF_FILE=qwen3_6_35b_a3b.ninfer
+              MODEL_SHA=1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2; MODEL_GIB=21.22 ;;
+  *) printf 'error: unknown NINFER_MODEL "%s" — pick nvfp4-27b, int-27b, qwen38-27b or moe-35b\n' \
+       "$NINFER_MODEL" >&2; exit 1 ;;
+esac
+MODEL_KEY="${NINFER_MODEL:-nvfp4-27b}"
+LABEL="ninfer-5090-$MODEL_KEY"
+
+# Prebuilt sm_120a binaries. Upstream ships none — no releases, no tags, and
+# their README says outright that there is no packaged binary distribution — so
+# until 'ninfer build' has produced one and it has been published, KIT_SHA1 is
+# empty and 'create' compiles on the box instead. Filling these three in is what
+# turns the slow path into the fast one; nothing else changes.
 B2_ENV="${NINFER_B2_ENV:-/Users/mike/coding/python_3/my_projects/awakedesk/.env}"
-KIT_KEY="${NINFER_KIT_KEY:-ninfer/ninfer-3090-kit-v0.6.1-sm86.tar.gz}"
-KIT_SHA1=5c0c002b5df93ac7aaa1443a18660788d0a77541
-# Public mirror of the same tarball — used when no B2 credentials are present.
-KIT_RELEASE_URL="${NINFER_KIT_URL:-https://github.com/coder903/ninfer/releases/download/v0.6.1-rtx3090-linux-sm86/ninfer-3090-kit-v0.6.1-sm86.tar.gz}"
+KIT_KEY="${NINFER_KIT_KEY:-}"
+KIT_SHA1="${NINFER_KIT_SHA1:-}"
+KIT_RELEASE_URL="${NINFER_KIT_URL:-}"
 
 cd "$PROJ"
 set -a; . ./.env; set +a
@@ -69,6 +96,7 @@ info() { printf '  %s\n' "$*"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need_instance() { [ -n "$INSTANCE" ] || die "no instance — run 'ninfer create'"; }
+have_kit() { [ -n "$KIT_SHA1" ] && { [ -n "$KIT_RELEASE_URL" ] || [ -n "$KIT_KEY" ]; }; }
 
 # --- vast api ---------------------------------------------------------------
 api_get() { need_instance; curl -fsS -H "Authorization: Bearer $VAST_API_KEY" "$API_BASE/instances/${INSTANCE}/"; }
@@ -119,48 +147,58 @@ wait_for() {
   done
 }
 
+# A publickey rejection is indistinguishable from a box that has not finished
+# booting, so this loop cannot tell you which one you are stuck on. If it runs
+# the full 300s on a host that Vast reports healthy, suspect the key, destroy,
+# and rent elsewhere rather than waiting longer.
 wait_ssh() {
   local waited=0
   until box true 2>/dev/null; do
-    [ "$waited" -ge 300 ] && die "ssh never came up"
+    [ "$waited" -ge 300 ] && die "ssh never came up (if the box looks healthy, the host never wrote authorized_keys — destroy and re-rent)"
     printf '\r  waiting for ssh… (%ds)   ' "$waited"; sleep 5; waited=$((waited+5))
   done
   info "ssh ready (${waited}s)"
 }
 
 # --- offers -----------------------------------------------------------------
+# The reliability floor is 0.995, not the 0.97 you might reach for. Three hosts
+# scoring above 0.97 failed in a row on the 3090 side — a dead GPU, a daemon
+# that stopped reporting, and one that never wrote authorized_keys — and one of
+# them scored 0.9959. Renting a healthy box first try is worth the extra cents.
 OFFER_FILTER='
 import sys, json, os
-disk = float(os.environ.get("DISK", "60"))
+disk = float(os.environ.get("DISK", "80"))
+cuda = float(os.environ.get("CUDA_MIN", "13.1"))
 o = json.load(sys.stdin).get("offers", [])
 ok = [x for x in o
       if (x.get("disk_space") or 0) >= disk + 10
       and (x.get("inet_down") or 0) >= 1000
-      and (x.get("reliability2") or 0) >= 0.97
-      and (x.get("cuda_max_good") or 0) >= 13.0
-      and (x.get("gpu_ram") or 0) >= 23000]
+      and (x.get("reliability2") or 0) >= 0.995
+      and (x.get("cuda_max_good") or 0) >= cuda
+      and (x.get("gpu_ram") or 0) >= 31000]
 ok.sort(key=lambda x: x["dph_total"])
 '
 
+OFFER_Q='{"gpu_name":{"eq":"RTX 5090"},"num_gpus":{"eq":1},"rentable":{"eq":true},"order":[["dph_total","asc"]],"limit":500}'
+
 pick_offer() {  # echoes: id dph down loc
-  local q='{"gpu_name":{"eq":"RTX 3090"},"num_gpus":{"eq":1},"rentable":{"eq":true},"order":[["dph_total","asc"]],"limit":500}'
-  curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" python3 -c "$OFFER_FILTER"'
-if not ok: sys.exit("no offer matches (need >=%dGB disk, >=1Gbps, CUDA 13+)" % disk)
+  curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
+  | DISK="$DISK_GB" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
+if not ok: sys.exit("no offer matches (need >=%dGB disk, >=1Gbps, CUDA %s+, reliability >=0.995)" % (disk, cuda))
 x = ok[0]
 print(x["id"], "%.4f" % x["dph_total"], "%.0f" % (x.get("inet_down") or 0), x.get("geolocation"))'
 }
 
 cmd_offers() {
-  local q='{"gpu_name":{"eq":"RTX 3090"},"num_gpus":{"eq":1},"rentable":{"eq":true},"order":[["dph_total","asc"]],"limit":500}'
-  step "rentable RTX 3090s (>= ${DISK_GB}+10 GB disk, >= 1 Gbps, CUDA 13+)"
-  curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" python3 -c "$OFFER_FILTER"'
-print("  %-9s %8s %11s %9s  %s" % ("offer", "gpu/hr", "stor/GB/mo", "down", "location"))
+  step "rentable RTX 5090s (>= ${DISK_GB}+10 GB disk, >= 1 Gbps, CUDA ${CUDA_MIN}+, reliability >= 0.995)"
+  curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
+  | DISK="$DISK_GB" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
+print("  %-9s %8s %11s %9s %6s  %s" % ("offer", "gpu/hr", "stor/GB/mo", "down", "rel", "location"))
 for x in ok[:10]:
-    print("  %-9s $%.4f  $%9.4f %6.0fMb  %s" % (
+    print("  %-9s $%.4f  $%9.4f %6.0fMb %6.4f  %s" % (
         x["id"], x["dph_total"], x.get("storage_cost") or 0,
-        x.get("inet_down") or 0, x.get("geolocation")))'
+        x.get("inet_down") or 0, x.get("reliability2") or 0, x.get("geolocation")))
+if not ok: print("  none right now — 5090s with CUDA 13.1 are a thin slice of the market")'
 }
 
 # --- opencode config --------------------------------------------------------
@@ -198,11 +236,14 @@ PY
 health() { curl -s -m 15 -o /dev/null -w '%{http_code}' \
            -H "Authorization: Bearer $NINFER_API_KEY" "$1/models" || echo 000; }
 
-# --- b2 kit -----------------------------------------------------------------
+# --- kit --------------------------------------------------------------------
 kit_url() {
-  # Public path: the GitHub release. Used whenever B2 credentials are absent,
-  # which is the normal case for anyone who did not build the kit themselves.
-  if [ ! -f "$B2_ENV" ]; then
+  have_kit || die "no kit published yet — 'ninfer build' then 'ninfer kit-pack'"
+  # Public path: whatever release URL has been filled in above. Used whenever B2
+  # credentials are absent, which is the normal case for anyone who did not
+  # build the kit themselves.
+  if [ ! -f "$B2_ENV" ] || [ -z "$KIT_KEY" ]; then
+    [ -n "$KIT_RELEASE_URL" ] || die "no public kit URL configured"
     printf '%s\n' "$KIT_RELEASE_URL"
     return 0
   fi
@@ -221,30 +262,181 @@ print(s["apiUrl"], s["downloadUrl"], s["bucketId"], d["authorizationToken"])')"
     printf '%s/file/%s/%s?Authorization=%s\n' "$dl" "$B2_BUCKET_NAME" "$KIT_KEY" "$dtok" )
 }
 
-install_kit() {  # unpack the kit and write the real argv; run on the box
-  { printf 'KIT_URL=%q\nKIT_SHA1=%q\nAPIKEY=%q\n' "$(kit_url)" "$KIT_SHA1" "$NINFER_API_KEY"; cat <<'EOS'
+install_kit() {  # download and unpack a published kit; run on the box
+  have_kit || die "no kit published yet — 'ninfer build' compiles from source instead"
+  { printf 'KIT_URL=%q\nKIT_SHA1=%q\nAPPS=%q\n' "$(kit_url)" "$KIT_SHA1" "$APPS"; cat <<'EOS'
 set -e
 curl -fsSL -o /root/kit.tar.gz "$KIT_URL"
 got=$(sha1sum /root/kit.tar.gz | cut -d' ' -f1)
 [ "$got" = "$KIT_SHA1" ] || { echo "sha1 mismatch: $got"; exit 1; }
 tar xzf /root/kit.tar.gz -C /root && rm -f /root/kit.tar.gz
-APPS=/root/ninfer-3090/build-sm86/apps; mkdir -p "$APPS"
+mkdir -p "$APPS"
 # install via rename — cp over a running binary fails with ETXTBSY
 for b in ninfer ninfer-serve; do
   cp "/root/kit/bin/$b" "$APPS/$b.new"; chmod +x "$APPS/$b.new"; mv -f "$APPS/$b.new" "$APPS/$b"
 done
-sed "s|__NINFER_API_KEY__|$APIKEY|" /root/kit/scripts/ninfer-argv.txt > /root/ninfer-argv-new.txt
-chmod 600 /root/ninfer-argv-new.txt
 echo "kit installed:"; ls -la "$APPS" | tail -2
 EOS
   } | box 'bash -s'
 }
 
+# --- building from source ---------------------------------------------------
+# Upstream distributes source only, so this is the path that exists on day one.
+# It runs on the rented box because the build needs an sm_120a device present
+# and CUDA 13.1; it cannot be cross-built from the Mac.
+cmd_build() {
+  need_instance
+  step "compiling sm_${ARCH} binaries on instance $INSTANCE"
+  info "this takes roughly 15-25 minutes and runs detached — 'ninfer log-build' to watch"
+  { printf 'SRC_REPO=%q\nSRC_BRANCH=%q\nARCH=%q\nAPPS=%q\n' "$SRC_REPO" "$SRC_BRANCH" "$ARCH" "$APPS"; cat <<'EOS'
+set -e
+cat > /root/build-ninfer.sh <<INNER
+#!/usr/bin/env bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+SRC_REPO="$SRC_REPO"; SRC_BRANCH="$SRC_BRANCH"; ARCH="$ARCH"; APPS="$APPS"
+INNER
+cat >> /root/build-ninfer.sh <<'INNER'
+# Provisioning owns apt. Two apt-get runs at once deadlock on the dpkg lock,
+# and both start within seconds of each other, so wait for its marker instead
+# of installing anything here.
+echo "[$(date -u +%T)] waiting for provisioning to finish installing deps"
+w=0
+until [ -f /root/deps.done ]; do
+  [ "$w" -ge 900 ] && { echo "deps never landed - see /root/provision.log"; exit 1; }
+  sleep 5; w=$((w+5))
+done
+echo "[$(date -u +%T)] deps ready after ${w}s"
+cmake --version | head -1
+
+echo "[$(date -u +%T)] clone $SRC_BRANCH"
+rm -rf /root/src
+git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_REPO" /root/src
+REV=$(git -C /root/src rev-parse HEAD)
+echo "[$(date -u +%T)] rev $REV"
+
+echo "[$(date -u +%T)] configure (arch $ARCH)"
+cmake -S /root/src -B /root/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
+  -DNINFER_BUILD_APPS=ON \
+  -DBUILD_TESTING=OFF \
+  -DNINFER_BUILD_BENCHMARKS=OFF
+
+echo "[$(date -u +%T)] compile with $(nproc) jobs"
+START=$(date +%s)
+cmake --build /root/build --parallel --target ninfer ninfer-serve
+SECS=$(( $(date +%s) - START ))
+echo "[$(date -u +%T)] compiled in ${SECS}s"
+
+mkdir -p "$APPS" /root/kit/bin
+for b in ninfer ninfer-serve; do
+  cp "/root/build/apps/$b" "/root/kit/bin/$b"
+  cp "/root/build/apps/$b" "$APPS/$b.new"; chmod +x "$APPS/$b.new"; mv -f "$APPS/$b.new" "$APPS/$b"
+done
+
+# Everything a reader needs to reproduce this exact tarball, and everything
+# Apache-2.0 attribution has to state.
+cat > /root/kit/BUILDINFO.txt <<INFO
+project        Neroued/ninfer
+source         $SRC_REPO
+branch         $SRC_BRANCH
+revision       $REV
+architecture   sm_$ARCH
+cuda           $(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')
+driver         $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+gpu            $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+image          nvidia/cuda:13.1.2-devel-ubuntu24.04
+host           Vast.ai, Ubuntu 24.04
+jobs           $(nproc)
+build_seconds  $SECS
+built_utc      $(date -u +%Y-%m-%dT%H:%M:%SZ)
+INFO
+cp /root/src/LICENSE /root/kit/LICENSE-Apache-2.0.txt
+echo "[$(date -u +%T)] BUILD_DONE"
+cat /root/kit/BUILDINFO.txt
+INNER
+chmod +x /root/build-ninfer.sh
+setsid nohup /root/build-ninfer.sh > /root/build.log 2>&1 < /dev/null &
+echo "build started"
+EOS
+  } | box 'bash -s'
+
+  local waited=0
+  until box 'grep -q BUILD_DONE /root/build.log' 2>/dev/null; do
+    box 'grep -q "^ninja: build stopped\|CMake Error\|Error 1$" /root/build.log' 2>/dev/null && \
+      die "build failed — ninfer ssh, then: tail -40 /root/build.log"
+    [ "$waited" -ge 3600 ] && die "build stalled — ninfer ssh, then: tail /root/build.log"
+    printf '\r  %s (%ds)   ' "$(box 'tail -1 /root/build.log 2>/dev/null | cut -c1-64' 2>/dev/null || echo '…')" "$waited"
+    sleep 20; waited=$((waited+20))
+  done
+  info "built (${waited}s)"
+  box 'cat /root/kit/BUILDINFO.txt' | sed 's/^/  /'
+}
+
+cmd_kit_pack() {  # tar the built binaries and bring the tarball back here
+  need_instance
+  box 'test -x /root/kit/bin/ninfer-serve' 2>/dev/null || die "nothing built on this box — run 'ninfer build' first"
+  local rev short name out
+  rev=$(box "sed -n 's/^revision *//p' /root/kit/BUILDINFO.txt")
+  short="${rev:0:12}"
+  name="ninfer-5090-kit-${short}-sm${ARCH}.tar.gz"
+  out="$PROJ/dist/$name"
+  mkdir -p "$PROJ/dist"
+
+  step "packing $name"
+  box "cd /root && tar czf /root/$name kit && ls -l /root/$name" | sed 's/^/  /'
+  read -r h p < <(ssh_target)
+  scp "${SSH_OPTS[@]}" -P "$p" "root@$h:/root/$name" "$out"
+  box "rm -f /root/$name"
+
+  step "kit is here"
+  info "file:  $out"
+  info "bytes: $(wc -c < "$out" | tr -d ' ')"
+  info "sha1:  $(shasum -a 1 "$out" | cut -d' ' -f1)"
+  info "sha256:$(shasum -a 256 "$out" | cut -d' ' -f1)"
+  info ""
+  info "publish it, then set KIT_SHA1 and KIT_RELEASE_URL near the top of this"
+  info "script so 'create' downloads instead of compiling."
+}
+
+# --- serving ----------------------------------------------------------------
+# The argv lives here rather than inside the kit so that changing a serving flag
+# does not mean rebuilding and republishing a 400 MB tarball.
+write_argv() {
+  box "cat > $ARGV_FILE" <<PY
+$APPS/ninfer-serve
+/root/models/$HF_FILE
+--host
+0.0.0.0
+--port
+8080
+--api-key
+$NINFER_API_KEY
+--max-context
+32768
+--kv-capacity
+auto
+--kv-dtype
+int8
+--max-concurrency
+8
+--spec
+mtp
+--draft-tokens
+3
+--lm-head-draft
+--no-thinking
+PY
+  box "chmod 600 $ARGV_FILE"
+}
+
 ensure_serving() {  # write supervise, launch if dead, wait for HTTP 200, repoint
   step "starting ninfer-serve"
+  write_argv
   box "cat > $SUPERVISE" <<PY
 #!/usr/bin/env bash
-# Keeps ninfer-serve alive using the TUNED argv (--no-thinking, concurrency 4).
+# Keeps ninfer-serve alive using the argv written by the CLI.
 mapfile -t A < $ARGV_FILE
 while true; do
   echo "=== starting \$(date -u) ===" >> /root/serve.log
@@ -265,7 +457,7 @@ PY
   local url waited=0
   url=$(endpoint); [ -n "$url" ] || die "no endpoint yet"
   until [ "$(health "$url")" = 200 ]; do
-    [ "$waited" -ge 300 ] && die "server never answered on $url (check: ninfer log)"
+    [ "$waited" -ge 420 ] && die "server never answered on $url (check: ninfer log)"
     printf '\r  loading… (%ds)   ' "$waited"; sleep 5; waited=$((waited+5))
   done
   info "serving (${waited}s)"
@@ -273,6 +465,7 @@ PY
   step "re-pointing OpenCode"
   repoint "$url"
   step "ready — $url"
+  info "model: $HF_FILE (${MODEL_GIB} GiB, $MODEL_KEY)"
   info "costing \$$(printf '%.4f' "$(field dph_total)")/hr; 'ninfer destroy' when you're done"
 }
 
@@ -283,6 +476,8 @@ cmd_status() {
   s=$(field actual_status)
   step "instance $INSTANCE — $(field gpu_name) — $s"
   info "label:   $(field label)"
+  info "model:   $HF_FILE (${MODEL_GIB} GiB)"
+  info "kit:     $(have_kit && echo 'prebuilt' || echo 'none published — builds from source')"
   info "rate:    \$$(printf '%.4f' "$(field dph_total)")/hr running"
   info "         \$$(printf '%.4f' "$(field storage_total_cost)")/hr stopped (disk only)"
   info "disk:    $(field disk_usage) GB used of $(field disk_space) GB"
@@ -298,7 +493,9 @@ cmd_create() {
   [ -n "$INSTANCE" ] && [ "$(field actual_status 2>/dev/null || true)" != "" ] && \
     die "instance $INSTANCE already exists — 'ninfer up' to resume it, or 'ninfer destroy' first"
 
-  step "1/6  picking a 3090"
+  local total=6; have_kit || total=7
+
+  step "1/$total  picking a 5090"
   local offer dph down loc
   if [ -n "${1:-}" ]; then
     offer="$1"; dph="?"; down="?"; loc="(chosen by hand — see 'ninfer offers')"
@@ -307,7 +504,7 @@ cmd_create() {
   fi
   info "offer $offer — \$$dph/hr — ${down} Mbps down — $loc"
 
-  step "2/6  renting it"
+  step "2/$total  renting it"
   local resp new
   resp=$(curl -fsS -X PUT -H "Authorization: Bearer $VAST_API_KEY" -H "Content-Type: application/json" \
     -d "{\"client_id\":\"me\",\"image\":\"$IMAGE\",\"disk\":$DISK_GB,\"label\":\"$LABEL\",\"runtype\":\"ssh\",\"onstart\":\"\",\"env\":{\"-p 8080:8080\":\"1\"}}" \
@@ -322,20 +519,28 @@ print(d["new_contract"])')
   info "instance $INSTANCE (saved to $STATE)"
   wait_for running 420
 
-  step "3/6  waiting for ssh"
+  step "3/$total  waiting for ssh"
   wait_ssh
 
-  step "4/6  provisioning (deps + 18.2 GB model, detached — this is the long part)"
-  { printf 'HF_REPO=%q\nHF_FILE=%q\n' "$HF_REPO" "$HF_FILE"; cat <<'EOS'
-cat > /root/provision-ninfer.sh <<'INNER'
+  step "4/$total  provisioning (deps + ${MODEL_GIB} GiB model, detached — this is the long part)"
+  { printf 'HF_REPO=%q\nHF_FILE=%q\nMODEL_SHA=%q\n' "$HF_REPO" "$HF_FILE" "$MODEL_SHA"; cat <<'EOS'
+cat > /root/provision-ninfer.sh <<INNER
 #!/usr/bin/env bash
 set -e
+HF_REPO="$HF_REPO"; HF_FILE="$HF_FILE"; MODEL_SHA="$MODEL_SHA"
+INNER
+cat >> /root/provision-ninfer.sh <<'INNER'
 export DEBIAN_FRONTEND=noninteractive
 echo "[$(date -u +%T)] apt deps"
 apt-get update -qq
+# Runtime libs and the build toolchain in one transaction, because the build
+# script runs concurrently and must not touch apt itself.
 apt-get install -y -qq --no-install-recommends \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  libcurl4-openssl-dev python3-venv python3-pip ca-certificates curl
+  libcurl4-openssl-dev python3-venv python3-pip ca-certificates curl \
+  git cmake ninja-build pkg-config
+touch /root/deps.done
+echo "[$(date -u +%T)] DEPS_DONE"
 echo "[$(date -u +%T)] hf client"
 python3 -m venv /root/hfenv
 /root/hfenv/bin/pip -q install --upgrade pip "huggingface_hub[hf_transfer]"
@@ -343,30 +548,38 @@ echo "[$(date -u +%T)] model download ($HF_FILE)"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 mkdir -p /root/models
 /root/hfenv/bin/hf download "$HF_REPO" "$HF_FILE" --local-dir /root/models
+echo "[$(date -u +%T)] verifying sha256"
+got=$(sha256sum "/root/models/$HF_FILE" | cut -d' ' -f1)
+[ "$got" = "$MODEL_SHA" ] || { echo "MODEL SHA MISMATCH: $got"; exit 1; }
 echo "[$(date -u +%T)] PROVISION_DONE"
 ls -la /root/models/
 INNER
-sed -i "s|\$HF_REPO|$HF_REPO|g; s|\$HF_FILE|$HF_FILE|g" /root/provision-ninfer.sh
 chmod +x /root/provision-ninfer.sh
 setsid nohup /root/provision-ninfer.sh > /root/provision.log 2>&1 < /dev/null &
 echo "provisioning started"
 EOS
   } | box 'bash -s'
 
-  step "5/6  installing the prebuilt binaries from B2"
-  install_kit
-  box "cp /root/kit/scripts/ninfer-supervise.sh /root/ 2>/dev/null || true"
+  if have_kit; then
+    step "5/$total  installing the prebuilt binaries"
+    install_kit
+  else
+    step "5/$total  no prebuilt kit — compiling from source"
+    info "upstream ships no binaries, so the first run on a box builds them"
+    cmd_build
+  fi
 
   info "waiting on the model download…"
   local waited=0
   until box 'grep -q PROVISION_DONE /root/provision.log' 2>/dev/null; do
+    box 'grep -q "SHA MISMATCH" /root/provision.log' 2>/dev/null && die "model failed its checksum — ninfer ssh, then: tail /root/provision.log"
     [ "$waited" -ge 1800 ] && die "provisioning stalled — ninfer ssh, then: tail /root/provision.log"
     printf '\r  %s (%ds)   ' "$(box 'tail -1 /root/provision.log 2>/dev/null | cut -c1-60' 2>/dev/null || echo '…')" "$waited"
     sleep 15; waited=$((waited+15))
   done
   info "provisioned (${waited}s)"
 
-  step "6/6  bringing up the server"
+  step "$total/$total  bringing up the server"
   ensure_serving
 }
 
@@ -374,13 +587,13 @@ cmd_destroy() {
   need_instance
   local s; s=$(field actual_status 2>/dev/null || echo unknown)
   step "destroying instance $INSTANCE (currently $s)"
-  info "this deletes the disk — the 18.2 GB model will be re-downloaded next time"
+  info "this deletes the disk — the ${MODEL_GIB} GiB model will be re-downloaded next time"
+  have_kit || info "and, with no published kit, the binaries will be recompiled — 'ninfer kit-pack' first if you want to keep them"
   curl -fsS -X DELETE -H "Authorization: Bearer $VAST_API_KEY" "$API_BASE/instances/${INSTANCE}/" >/dev/null
   # only forget the saved id if that is the one we just deleted — a
   # NINFER_INSTANCE override must not clear the tracked instance
   [ -f "$STATE" ] && [ "$(cat "$STATE")" = "$INSTANCE" ] && rm -f "$STATE"
   step "destroyed — idle cost is now \$0.00/hr"
-  info "binaries are safe on B2; 'ninfer create' rebuilds in ~6-8 min"
 }
 
 cmd_up() {
@@ -414,9 +627,12 @@ case "${1:-status}" in
   down|stop) cmd_down ;;
   status)    cmd_status ;;
   offers)    cmd_offers ;;
+  build)     cmd_build ;;
+  kit-pack)  cmd_kit_pack ;;
   kit-url)   kit_url ;;
   restore)   install_kit ;;
   ssh)       shift; read -r h p < <(ssh_target); exec ssh "${SSH_OPTS[@]}" -p "$p" "root@$h" "$@" ;;
   log)       box 'tail -n 40 -f /root/serve.log' ;;
-  *)         sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  log-build) box 'tail -n 40 -f /root/build.log' ;;
+  *)         sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
