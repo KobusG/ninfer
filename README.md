@@ -1,21 +1,39 @@
 # ninfer
 
-Run **Qwen3.8-27B** on a rented **RTX 3090**, and pay nothing when you're idle.
+**A prebuilt Linux build of the NInfer RTX 3090 engine — the one thing upstream doesn't ship —
+plus a single bash script that rents the GPU to run it on.**
 
-`ninfer` is a single bash script that rents a GPU on [Vast.ai](https://vast.ai), provisions it
-from scratch, serves an OpenAI-compatible API, and tears the whole thing down when you're done.
-Idle cost is **$0.00/hr** — you destroy the box instead of leaving it parked, and a rebuild takes
-a couple of minutes because the compiled binaries are cached off-box.
+Upstream ships a ready-to-run archive for Windows. Linux users get a Dockerfile and a
+"build it yourself" guide. In their own words, from
+[`RELEASE_NOTES_0.6.1.md`](https://github.com/Don-Chad/ninfer-3090/blob/main/RELEASE_NOTES_0.6.1.md):
 
-A typical session costs about a quarter an hour, and nothing at all overnight.
+> The project does not publish a prebuilt Linux archive.
+
+This project closes that gap. It provides `sm_86` Linux binaries for **v0.6.1-rtx3090**, and a
+CLI that rents an RTX 3090 on [Vast.ai](https://vast.ai), provisions it, serves an
+OpenAI-compatible API, and tears it all down so idle cost is **$0.00/hr**.
 
 ```
-ninfer create     # rent a fresh 3090 and provision it (~2-8 min)
+ninfer create     # rent a 3090 and provision it (~2-8 min)
 ninfer status     # state, endpoint, hourly cost, health
 ninfer destroy    # delete it — idle cost goes to $0.00
 ```
 
-## Why this exists
+## Platform support, upstream vs here
+
+| | Linux | Windows |
+| --- | --- | --- |
+| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Docker or source build only | Prebuilt archive |
+| **this project** | **Prebuilt `sm_86` archive, v0.6.1** | — (use upstream) |
+
+Upstream's last release carrying a Linux tarball was **v0.3.1**. Every release since — v0.4.0,
+v0.5.0, v0.6.0 — ships Windows binaries only. This build tracks **v0.6.1**.
+
+Upstream also notes that their Linux validation ran without a real model artifact, so no Linux
+throughput figures were published. These binaries have been run against the real 18.2 GB
+Qwen3.8-27B checkpoint on Ubuntu 24.04 — see [Verified on](#verified-on) below.
+
+## Why rent, instead of leaving it running
 
 Renting a GPU by the hour only saves money if you actually stop paying when you stop using it.
 The friction is that tearing a box down means rebuilding it later — reinstalling CUDA deps,
@@ -123,20 +141,39 @@ provider, are skipped harmlessly. Adapt the array for other clients.
 6. **Serve** — launch under a supervisor loop that restarts on crash, wait for HTTP 200, then
    rewrite client config with the new address.
 
-## The prebuilt kit
+## The prebuilt Linux kit
 
-Step 5 pulls a tarball of binaries from a **private** Backblaze B2 bucket. That bucket is not
-public, so **`ninfer create` will fail at step 5 unless you supply your own.**
+Step 5 installs a tarball of `sm_86` binaries — `ninfer` and `ninfer-serve`, built from
+[Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) `release/v0.6.0-rtx3090`
+(rev `403fc56d`, VERSION `0.6.1-rtx3090`) against `nvidia/cuda:13.1.2-devel-ubuntu24.04`.
 
-You have two options:
+Installing it is what lets a rebuilt box come up in minutes instead of paying an **883-second**
+compile every single time you destroy and re-create. That build cost is the entire reason people
+leave GPU instances running, and the entire reason this kit exists.
 
-- **Build the engine yourself** from [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090),
-  tar up `bin/` and `scripts/`, and host it wherever you like — then point `NINFER_B2_ENV`,
-  `NINFER_KIT_KEY` and `KIT_SHA1` at your copy.
-- **Compile on the box** each time, by replacing the `install_kit` step with a build. Costs about
-  883 seconds per provision, which is exactly the tax this script exists to avoid.
+The script fetches the tarball over a signed, time-limited URL and verifies it by SHA-1 before
+unpacking. `NINFER_B2_ENV` and `NINFER_KIT_KEY` point at the storage holding it; `ninfer kit-url`
+prints the signed URL, and `ninfer restore` reinstalls onto a running box.
 
-`ninfer kit-url` shows how the signed URL is minted if you want to mirror the approach.
+> **Note:** the kit is currently served from a private bucket, so `ninfer create` will fail at
+> step 5 for anyone but the author. Publishing it as a GitHub Release is the next step — see
+> [issues](https://github.com/coder903/ninfer/issues). Until then, build from
+> [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) using their Linux guide and
+> repoint `NINFER_KIT_KEY` and `KIT_SHA1` at your own copy.
+
+## Verified on
+
+The published binaries have been run end to end, not merely compiled:
+
+| | |
+| --- | --- |
+| Host | Vast.ai RTX 3090 (24 GB), Ubuntu 24.04 |
+| Image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
+| Engine | `0.6.1-rtx3090`, `sm_86` |
+| Model | `neroued/Qwen3.8-27B-NInfer`, 18.2 GB |
+| Resident | 21,013 MiB of 24,576 MiB |
+| Serving | `GET /v1/models` → 200; `POST /v1/chat/completions` round-trip 0.69 s |
+| Profile | 64K context, `int8` KV, spec MTP w/ 3 draft tokens, concurrency 4 |
 
 ## Credits
 
