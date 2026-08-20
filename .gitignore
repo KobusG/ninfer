@@ -4,6 +4,10 @@
 .ninfer-instance
 .ninfer-badhosts
 
+# --- build output ------------------------------------------------------------
+# Kits produced by 'ninfer kit-pack'. Hundreds of MB; they belong on Releases.
+dist/
+
 # --- scratch work, not part of this project ----------------------------------
 # Local experiments that happen to share this checkout. Never published.
 sandbox/

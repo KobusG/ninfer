@@ -12,7 +12,7 @@
 #   ninfer log      tail the server log
 #   ninfer build    compile sm_120a binaries on the current box
 #   ninfer kit-pack package this box's binaries and pull the tarball down here
-#   ninfer kit-url  download URL for the prebuilt binaries, once one exists
+#   ninfer kit-url  download URL for the prebuilt binaries
 #   ninfer restore  reinstall those binaries on the current box
 #
 # Nothing about the address is stable: Vast reassigns the public IP, the mapped
@@ -78,13 +78,12 @@ LABEL="ninfer-5090-$MODEL_KEY"
 
 # Prebuilt sm_120a binaries. Upstream ships none — no releases, no tags, and
 # their README says outright that there is no packaged binary distribution — so
-# until 'ninfer build' has produced one and it has been published, KIT_SHA1 is
-# empty and 'create' compiles on the box instead. Filling these three in is what
-# turns the slow path into the fast one; nothing else changes.
+# the kit below is one this project built and published. Blank KIT_SHA1 to fall
+# back to compiling on the box, which is what happens before any kit exists.
 B2_ENV="${NINFER_B2_ENV:-/Users/mike/coding/python_3/my_projects/awakedesk/.env}"
 KIT_KEY="${NINFER_KIT_KEY:-}"
-KIT_SHA1="${NINFER_KIT_SHA1:-}"
-KIT_RELEASE_URL="${NINFER_KIT_URL:-}"
+KIT_SHA1="${NINFER_KIT_SHA1:-0a7560e3d9c526ef6b6ab1f1ca139a9101a50a6f}"
+KIT_RELEASE_URL="${NINFER_KIT_URL:-https://github.com/coder903/ninfer/releases/download/rtx5090-linux-sm120a-feaf4dd0/ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz}"
 
 cd "$PROJ"
 set -a; . ./.env; set +a

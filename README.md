@@ -11,7 +11,7 @@ neither publishes what a Linux user actually needs:
 | --- | --- | --- |
 | [Neroued/ninfer](https://github.com/Neroued/ninfer) — the RTX 5090 engine | none, ever | none, ever |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) — the RTX 3090 backport | none since v0.3.1 | prebuilt archive |
-| **this project** | **`sm_86` v0.6.1 for the 3090** | — (use upstream) |
+| **this project** | **`sm_86` v0.6.1 · `sm_120a` rev `feaf4dd0`** | — (use upstream) |
 
 Both say so themselves. The 3090 fork, in
 [`RELEASE_NOTES_0.6.1.md`](https://github.com/Don-Chad/ninfer-3090/blob/main/RELEASE_NOTES_0.6.1.md):
@@ -23,8 +23,9 @@ And the 5090 project, which goes further — it has no releases and no tags at a
 > There is no install target or packaged binary distribution; NInfer is run from its source build
 > tree.
 
-So the 3090 gap is Linux-shaped. The 5090 gap is every-platform-shaped: the only way to run it is
-to compile it yourself on a machine that already has the card.
+So the 3090 gap is Linux-shaped. The 5090 gap is every-platform-shaped — upstream's only path is a
+`Dockerfile` you build yourself on a machine that already has the card. As far as we can tell, the
+`sm_120a` tarball below is the only prebuilt NInfer binary that exists anywhere.
 
 ```
 ninfer create     # rent a GPU and provision it
@@ -39,8 +40,9 @@ ninfer destroy    # delete it — idle cost goes to $0.00
 | Architecture | `sm_86`, Ampere, 24 GB | `sm_120a`, Blackwell, 32 GB |
 | Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` |
 | Default model | Qwen3.8-27B `groupwise-int` | Qwen3.6-27B **NVFP4** |
-| Binaries | prebuilt, downloaded in seconds | compiled on the box on first run |
-| Typical rent | ~$0.28/hr | ~$0.40–0.70/hr |
+| Binaries | prebuilt, downloaded in seconds | prebuilt, downloaded in seconds |
+| Typical rent | ~$0.28/hr | ~$0.40–0.95/hr |
+| Compile, if you skip the kit | 883 s at `-j12` | 302 s at `-j128` |
 
 NVFP4 is the 5090's default because W4A4 tensor cores are the one thing a 3090 physically cannot
 do. Upstream measures that profile at 1,146.9 aggregate decode tok/s across eight concurrent
@@ -194,57 +196,81 @@ provider, are skipped harmlessly. Adapt the array for other clients.
 6. **Serve** — launch under a supervisor loop that restarts on crash, wait for HTTP 200, then
    rewrite client config with the new address.
 
-## The prebuilt Linux kit
+## The prebuilt Linux kits
 
-Step 5 installs a tarball of `sm_86` binaries — `ninfer` and `ninfer-serve`, built from
-[Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) `release/v0.6.0-rtx3090`
-(rev `403fc56d`, VERSION `0.6.1-rtx3090`) against `nvidia/cuda:13.1.2-devel-ubuntu24.04`.
+Both cards install a tarball of binaries — `ninfer` and `ninfer-serve` — rather than compiling on
+the box. That build cost is the entire reason people leave GPU instances running, and the entire
+reason these kits exist.
 
-Installing it is what lets a rebuilt box come up in minutes instead of paying an **883-second**
-compile every single time you destroy and re-create. That build cost is the entire reason people
-leave GPU instances running, and the entire reason this kit exists.
+| | 3090 kit | 5090 kit |
+| --- | --- | --- |
+| Architecture | `sm_86` | `sm_120a` |
+| Built from | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) `release/v0.6.0-rtx3090`, rev `403fc56d`, VERSION `0.6.1-rtx3090` | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master`, rev `feaf4dd0` |
+| Build image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
+| Compile it replaces | 883 s at `-j12` | 302 s at `-j128` |
+| Size | 375 MB | 297 MB |
 
-The script fetches the tarball over a signed, time-limited URL and verifies it by SHA-1 before
-unpacking. `NINFER_B2_ENV` and `NINFER_KIT_KEY` point at the storage holding it; `ninfer kit-url`
-prints the signed URL, and `ninfer restore` reinstalls onto a running box.
+Every 5090 tarball also carries a `BUILDINFO.txt` recording the exact revision, CUDA version,
+driver, GPU, job count and wall-clock build time of that specific build.
+
+The script fetches a tarball and verifies it by SHA-1 before unpacking. `ninfer kit-url` prints the
+URL it would use, and `ninfer restore` reinstalls onto a box the CLI is already managing. If you
+have your own object storage, `NINFER_B2_ENV` and `NINFER_KIT_KEY` point at a private copy;
+otherwise the public GitHub release is used, which is the normal case.
 
 ### Download
 
-The kit is published on this repo's
-[**Releases**](https://github.com/coder903/ninfer/releases/latest) page:
+Both kits are on this repo's [**Releases**](https://github.com/coder903/ninfer/releases) page.
+
+RTX 5090, `sm_120a`:
 
 ```bash
-curl -fLO https://github.com/coder903/ninfer/releases/latest/download/ninfer-3090-kit-v0.6.1-sm86.tar.gz
-curl -fLO https://github.com/coder903/ninfer/releases/latest/download/SHA256SUMS.txt
+T=rtx5090-linux-sm120a-feaf4dd0
+curl -fLO https://github.com/coder903/ninfer/releases/download/$T/ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz
+curl -fLO https://github.com/coder903/ninfer/releases/download/$T/SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt
+tar xzf ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz -C /root
+```
+
+RTX 3090, `sm_86`:
+
+```bash
+T=v0.6.1-rtx3090-linux-sm86
+curl -fLO https://github.com/coder903/ninfer/releases/download/$T/ninfer-3090-kit-v0.6.1-sm86.tar.gz
+curl -fLO https://github.com/coder903/ninfer/releases/download/$T/SHA256SUMS.txt
 sha256sum -c SHA256SUMS.txt
 tar xzf ninfer-3090-kit-v0.6.1-sm86.tar.gz -C /root
 ```
 
-That gives you `/root/kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA toolchain, no
-883-second build. `ninfer restore` does the same thing onto a box the CLI is already managing.
+Either gives you `/root/kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA toolchain, no
+compile. They need the same runtime libraries the build had: `libavcodec`, `libavformat`,
+`libavutil`, `libswscale` and `libcurl`.
 
 The binaries are Apache-2.0 and are **not** original work of this project — see
-[`3090/third_party/ninfer-3090/ATTRIBUTION.md`](3090/third_party/ninfer-3090/ATTRIBUTION.md).
+[`3090/third_party/ninfer-3090/ATTRIBUTION.md`](3090/third_party/ninfer-3090/ATTRIBUTION.md) and
+[`5090/third_party/ninfer/ATTRIBUTION.md`](5090/third_party/ninfer/ATTRIBUTION.md).
 
 ## Verified on
 
 The published binaries have been run end to end, not merely compiled:
 
-| | |
-| --- | --- |
-| Host | Vast.ai RTX 3090 (24 GB), Ubuntu 24.04 |
-| Image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
-| Engine | `0.6.1-rtx3090`, `sm_86` |
-| Model | `neroued/Qwen3.8-27B-NInfer`, 18.2 GB |
-| Resident | 21,013 MiB of 24,576 MiB |
-| Serving | `GET /v1/models` → 200; `POST /v1/chat/completions` round-trip 0.69 s |
-| Profile | 64K context, `int8` KV, spec MTP w/ 3 draft tokens, concurrency 4 |
+| | RTX 3090 | RTX 5090 |
+| --- | --- | --- |
+| Host | Vast.ai, Ubuntu 24.04 | Vast.ai, Ubuntu 24.04, driver 610.43.03 |
+| Image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
+| Engine | `0.6.1-rtx3090`, `sm_86` | rev `feaf4dd0`, `sm_120a` |
+| Model | `Qwen3.8-27B-NInfer`, 18.2 GB | `Qwen3.6-27B-nvfp4-NInfer`, 17.07 GiB |
+| Serving | `/v1/models` → 200; chat round-trip 0.69 s | `/v1/models` → 200; chat round-trip 0.93 s, 91 output tokens |
+| Profile | 64K context, `int8` KV, MTP-3, concurrency 4 | 32K context, `int8` KV, MTP-3 + `--lm-head-draft`, concurrency 8 |
+
+The model artifact is checked against upstream's published SHA-256 after download, and the kit
+against its SHA-1 before unpacking.
 
 ## Credits
 
 This script is only orchestration. The actual inference engine is someone else's work:
 
-- **[Neroued/ninfer](https://github.com/Neroued/ninfer)** — the upstream high-performance
+- **[Neroued/ninfer](https://github.com/Neroued/ninfer)** — the RTX 5090 engine, and the upstream high-performance
   single-GPU inference engine (Apache-2.0)
 - **[Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090)** — the RTX 3090 fork these
   binaries are built from, `release/v0.6.0-rtx3090` (Apache-2.0)

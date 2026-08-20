@@ -7,7 +7,7 @@ The `ninfer` and `ninfer-serve` binaries distributed by this project's GitHub Re
 | --- | --- |
 | Project | [Neroued/ninfer](https://github.com/Neroued/ninfer) |
 | Branch | `master` |
-| Revision | _pending first build_ |
+| Revision | `feaf4dd0983fdaeb2ba4c06eec6da350e644fb3a` |
 | Version string | none — upstream publishes no tags or releases |
 | License | Apache License 2.0 — see [`LICENSE`](LICENSE) |
 
@@ -23,9 +23,9 @@ the result is reproducible:
 | --- | --- |
 | Target architecture | `sm_120a` (RTX 5090) |
 | Build image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
-| Build host | Vast.ai RTX 5090, Ubuntu 24.04 |
-| Build time | _pending first build_ |
-| Built | _pending first build_ |
+| Build host | Vast.ai RTX 5090, Ubuntu 24.04, driver 610.43.03 |
+| Build time | 302 s at `-j128` |
+| Built | 2026-08-20 16:39:34 UTC |
 
 Upstream's `CMakeLists.txt` rejects any value of `CMAKE_CUDA_ARCHITECTURES` other than `120a` and
 any CUDA compiler older than 13.1, so neither is a choice this project made.
