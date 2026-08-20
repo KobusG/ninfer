@@ -33,6 +33,9 @@ ninfer status     # state, endpoint, hourly cost, health
 ninfer destroy    # delete it — idle cost goes to $0.00
 ```
 
+If you already own the card, skip the renting entirely — see
+[Run it on your own card](#run-it-on-your-own-card), which is just download, verify, serve.
+
 ## Which card
 
 | | `3090/` | `5090/` |
@@ -99,6 +102,9 @@ work in it. Another card would be another sibling.
 
 Nothing needs to be installed on your machine beyond that — no CUDA, no Python packages, no
 Docker. Everything heavy happens on the rented box.
+
+That list is for renting. Running the engine on a GPU you already have needs none of it and has
+its own, quite different requirements — [Run it on your own card](#run-it-on-your-own-card).
 
 ## Setup
 
@@ -308,7 +314,7 @@ T=rtx5090-linux-sm120a-feaf4dd0
 curl -fLO https://github.com/coder903/ninfer/releases/download/$T/ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz
 curl -fLO https://github.com/coder903/ninfer/releases/download/$T/SHA256SUMS.txt
 sha256sum -c SHA256SUMS.txt
-tar xzf ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz -C /root
+tar xzf ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz -C ~/
 ```
 
 RTX 3090, `sm_86`:
@@ -318,16 +324,226 @@ T=v0.6.1-rtx3090-linux-sm86
 curl -fLO https://github.com/coder903/ninfer/releases/download/$T/ninfer-3090-kit-v0.6.1-sm86.tar.gz
 curl -fLO https://github.com/coder903/ninfer/releases/download/$T/SHA256SUMS.txt
 sha256sum -c SHA256SUMS.txt
-tar xzf ninfer-3090-kit-v0.6.1-sm86.tar.gz -C /root
+tar xzf ninfer-3090-kit-v0.6.1-sm86.tar.gz -C ~/
 ```
 
-Either gives you `/root/kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA toolchain, no
-compile. They need the same runtime libraries the build had: `libavcodec`, `libavformat`,
-`libavutil`, `libswscale` and `libcurl`.
+Either gives you `kit/bin/{ninfer,ninfer-serve}` ready to run — no CUDA toolchain, no compile.
+They are dynamically linked, so the host still has to supply the runtime libraries the build had;
+[Run it on your own card](#run-it-on-your-own-card) lists exactly which, and what to do with them.
 
 The binaries are Apache-2.0 and are **not** original work of this project — see
 [`3090/third_party/ninfer-3090/ATTRIBUTION.md`](3090/third_party/ninfer-3090/ATTRIBUTION.md) and
 [`5090/third_party/ninfer/ATTRIBUTION.md`](5090/third_party/ninfer/ATTRIBUTION.md).
+
+## Run it on your own card
+
+Nothing above is needed if the GPU is already in your machine. The rental script exists because
+most people don't own one of these cards; if you do, the kit *is* the product. Download it,
+download a checkpoint, run the binary. There is no installer and nothing to compile.
+
+### What the binaries actually require
+
+Both kits are dynamically linked and were built inside `nvidia/cuda:13.1.2-devel-ubuntu24.04`,
+which sets a hard floor. Read straight off the ELF headers of `ninfer-serve`:
+
+| Requirement | Why |
+| --- | --- |
+| x86-64 Linux, glibc **≥ 2.38** | highest versioned symbol referenced is `GLIBC_2.38` |
+| `libstdc++.so.6` providing **`GLIBCXX_3.4.32`** | GCC 13 or newer |
+| ffmpeg **6.x** runtime — `libavcodec.so.60`, `libavformat.so.60`, `libavutil.so.58`, `libswscale.so.7` | linked directly, by soname |
+| `libcurl.so.4` (`CURL_OPENSSL_4`) | linked directly |
+| **CUDA 13 runtime** — `libcudart.so.13` | `RUNPATH` is `/usr/local/cuda-13.1/targets/x86_64-linux/lib` |
+| A driver providing `libcuda.so.1`, new enough for CUDA 13 | `nvidia-smi` should report CUDA Version 13.x — the kits were built against driver 610.43.03 |
+| The matching architecture — `sm_120a` (RTX 5090) or `sm_86` with 24 GB (RTX 3090 / 3090 Ti) | a CUDA build is only valid for what it was compiled for |
+
+**Ubuntu 24.04 satisfies every line of that as installed** — glibc 2.39, ffmpeg 6.1. Ubuntu 22.04
+(glibc 2.35, ffmpeg 4.4) and Debian 12 (glibc 2.36, ffmpeg 5.1) satisfy neither the floor nor the
+sonames, and no flag fixes that. On those, run the kit inside a container built
+`FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04`, or build from upstream source instead.
+
+The dependencies themselves, on 24.04:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
+```
+
+Those are the `-dev` names the build image used, so they are known to resolve; the runtime-only
+`libav*` / `libcurl4` packages work equally well if you'd rather not pull headers. For CUDA you
+need only the **runtime**, not the toolchain — `cuda-cudart-13-1` from NVIDIA's apt repository
+installs into precisely the path the `RUNPATH` above names. If your CUDA lives elsewhere, export
+`LD_LIBRARY_PATH` to point at the directory holding `libcudart.so.13`.
+
+Then confirm, before going further:
+
+```bash
+ldd kit/bin/ninfer-serve | grep 'not found'   # silence means you're done
+```
+
+### 1. Get the kit
+
+Use the [Download](#download) commands above — `sm_120a` for a 5090, `sm_86` for a 3090. They
+unpack to `~/kit/bin/`, and the SHA-256 check in those commands is not optional decoration: you
+are about to run these binaries as yourself, on your own machine.
+
+### 2. Get a checkpoint
+
+The artifacts live on Hugging Face and are a closed set — the engine rejects anything not
+registered. Every one is verified by SHA-256:
+
+| File | Repo | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `qwen3_6_27b_nvfp4.ninfer` | `neroued/Qwen3.6-27B-nvfp4-NInfer` | 17.07 GiB | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
+| `qwen3_6_27b.ninfer` | `neroued/Qwen3.6-27B-NInfer` | 16.29 GiB | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
+| `qwen3_8_27b.ninfer` | `neroued/Qwen3.8-27B-NInfer` | 16.96 GiB | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| `qwen3_6_35b_a3b.ninfer` | `neroued/Qwen3.6-35B-A3B-NInfer` | 21.22 GiB | `1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2` |
+
+NVFP4 needs Blackwell — on a 3090 use `qwen3_8_27b.ninfer`, which is what that card serves here.
+
+```bash
+python3 -m venv ~/hfenv
+~/hfenv/bin/pip -q install --upgrade "huggingface_hub[hf_transfer]"
+
+HF_HUB_ENABLE_HF_TRANSFER=1 ~/hfenv/bin/hf download \
+  neroued/Qwen3.6-27B-nvfp4-NInfer qwen3_6_27b_nvfp4.ninfer --local-dir ~/models
+
+sha256sum ~/models/qwen3_6_27b_nvfp4.ninfer     # compare against the table
+```
+
+`hf_transfer` is worth the venv — it saturates a fast link where a single stream won't. If you'd
+rather keep Python out of it entirely, the file is a plain public download:
+
+```bash
+mkdir -p ~/models
+curl -fL -o ~/models/qwen3_6_27b_nvfp4.ninfer \
+  https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer/resolve/main/qwen3_6_27b_nvfp4.ninfer
+```
+
+### 3. Prove it works, without a server
+
+The kit's other binary is upstream's one-shot CLI. It answers on stdout and puts diagnostics on
+stderr, so it isolates "does the engine run on this machine" from anything HTTP:
+
+```bash
+~/kit/bin/ninfer ~/models/qwen3_6_27b_nvfp4.ninfer \
+  --prompt "Name three uses for a paperclip." --max-new 128 --no-thinking
+```
+
+### 4. Serve it
+
+Same argv this project runs on rented boxes, with the listener bound to localhost instead of every
+interface. Invent `NINFER_API_KEY` yourself — it's simply the bearer token the server will demand.
+
+**RTX 5090:**
+
+```bash
+export NINFER_API_KEY=any-string-you-choose
+
+~/kit/bin/ninfer-serve ~/models/qwen3_6_27b_nvfp4.ninfer \
+  --host 127.0.0.1 --port 8080 --api-key "$NINFER_API_KEY" \
+  --max-context 32768 --kv-capacity auto --kv-dtype int8 \
+  --max-concurrency 8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --no-thinking
+```
+
+**RTX 3090:**
+
+```bash
+~/kit/bin/ninfer-serve ~/models/qwen3_8_27b.ninfer \
+  --host 127.0.0.1 --port 8080 --api-key "$NINFER_API_KEY" \
+  --model-id qwen3.8-27b \
+  --max-context 65536 --kv-capacity 65536 --kv-dtype int8 \
+  --max-concurrency 4 --max-pending-requests 32 --prefill-chunk 1024 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --default-max-tokens 8192 --cors \
+  --temperature 0.6 --top-p 0.95 --no-thinking
+```
+
+`--max-concurrency` is capped at 8 by the engine. `--kv-capacity auto` sizes the cache to whatever
+VRAM is left after the weights load, which is the right choice on a card that also drives your
+display — a desktop session can easily be holding 1–2 GB. If the server dies during load on a
+24 GB card, lower `--max-context` and `--kv-capacity` before anything else. `ninfer-serve --help`
+lists every flag, including `--vision`, `--request-log-jsonl` and `--greedy`.
+
+Pick a card on a multi-GPU box with `CUDA_VISIBLE_DEVICES=1`; one process serves one GPU.
+
+### 5. Call it
+
+```bash
+curl -H "Authorization: Bearer $NINFER_API_KEY" http://127.0.0.1:8080/v1/models
+
+curl -H "Authorization: Bearer $NINFER_API_KEY" -H "Content-Type: application/json" \
+     -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"hello"}]}' \
+     http://127.0.0.1:8080/v1/chat/completions
+```
+
+`GET /v1/models` is authoritative for the model id — it comes from the artifact's own identity,
+and it is what you must send in `"model"`.
+
+### 6. Keep it running
+
+Locally there's no reason to tear anything down, so hand it to systemd:
+
+```ini
+# /etc/systemd/system/ninfer.service
+[Unit]
+Description=NInfer inference server
+After=network-online.target
+
+[Service]
+User=YOUR_USER
+Environment=NINFER_API_KEY=any-string-you-choose
+ExecStart=/home/YOUR_USER/kit/bin/ninfer-serve /home/YOUR_USER/models/qwen3_6_27b_nvfp4.ninfer \
+  --host 127.0.0.1 --port 8080 --api-key ${NINFER_API_KEY} \
+  --max-context 32768 --kv-capacity auto --kv-dtype int8 \
+  --max-concurrency 8 --spec mtp --draft-tokens 3 --lm-head-draft --no-thinking
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now ninfer
+journalctl -u ninfer -f
+```
+
+Use `EnvironmentFile=` instead of `Environment=` if you'd rather the key not appear in
+`systemctl show`.
+
+To point [OpenCode](https://opencode.ai) at it, add a provider by hand. The config rewriting the
+script does on `create` exists only because a rented box changes address on every restart, and
+yours never will:
+
+```json
+{
+  "provider": {
+    "ninfer-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NInfer (local)",
+      "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "{env:NINFER_API_KEY}" },
+      "models": {
+        "qwen3.6-27b": {
+          "name": "qwen3.6-27b [NInfer local]",
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    }
+  }
+}
+```
+
+### Two things to know going in
+
+The `ninfer` **bash script** in this repo has no local mode — it manages Vast.ai instances and
+nothing else. Running on your own card means running the binaries directly, as above; the script
+never enters the picture.
+
+And the [throughput numbers](#measured-throughput) below were measured on rented, datacenter-cooled
+cards. A desktop 5090 in a warm case throttles differently, so treat them as the shape of the
+curve rather than a promise about your machine.
 
 ## Measured throughput
 
