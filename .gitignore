@@ -1,0 +1,18 @@
+# --- secrets & machine-local state -------------------------------------------
+.env
+.ninfer-instance
+
+# --- python env / caches -----------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+
+# --- scratch work, not part of this project ----------------------------------
+# Flask experiment + odds and ends that happen to share this directory.
+temperature_app/
+run.py
+wsgi.py
+fibonacci.py
+
+# --- macOS -------------------------------------------------------------------
+.DS_Store
