@@ -375,6 +375,7 @@ The published binaries have been run end to end, not merely compiled:
 | Image | `nvidia/cuda:13.1.2-devel-ubuntu24.04` | `nvidia/cuda:13.1.2-devel-ubuntu24.04` |
 | Engine | `0.6.1-rtx3090`, `sm_86` | rev `feaf4dd0`, `sm_120a` |
 | Model | `Qwen3.8-27B-NInfer`, 18.2 GB | `Qwen3.6-27B-nvfp4-NInfer`, 17.07 GiB |
+| Resident | 21,013 MiB of 24,576 MiB | 24,895 MiB of 32,607 MiB |
 | Serving | `/v1/models` → 200; chat round-trip 0.69 s | `/v1/models` → 200; chat round-trip 0.93 s, 91 output tokens |
 | Profile | 64K context, `int8` KV, MTP-3, concurrency 4 | 32K context, `int8` KV, MTP-3 + `--lm-head-draft`, concurrency 8 |
 
