@@ -16,7 +16,17 @@
 # port and the ssh port on every start, so all three are resolved per call.
 set -euo pipefail
 
-PROJ="${NINFER_PROJ:-/Users/mike/coding/python_3/my_projects/ninfer}"
+# Resolve this script's real directory, following symlinks, so a clone works
+# from anywhere and an installed symlink still finds its own .env.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir=$(cd -P "$(dirname "$_src")" && pwd)
+  _src=$(readlink "$_src")
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+SELF_DIR=$(cd -P "$(dirname "$_src")" && pwd)
+
+PROJ="${NINFER_PROJ:-$SELF_DIR}"
 STATE="$PROJ/.ninfer-instance"
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 CONFIGS=(
@@ -39,6 +49,8 @@ SUPERVISE=/root/ninfer-supervise.sh
 B2_ENV="${NINFER_B2_ENV:-/Users/mike/coding/python_3/my_projects/awakedesk/.env}"
 KIT_KEY="${NINFER_KIT_KEY:-ninfer/ninfer-3090-kit-v0.6.1-sm86.tar.gz}"
 KIT_SHA1=5c0c002b5df93ac7aaa1443a18660788d0a77541
+# Public mirror of the same tarball — used when no B2 credentials are present.
+KIT_RELEASE_URL="${NINFER_KIT_URL:-https://github.com/coder903/ninfer/releases/download/v0.6.1-rtx3090-linux-sm86/ninfer-3090-kit-v0.6.1-sm86.tar.gz}"
 
 cd "$PROJ"
 set -a; . ./.env; set +a
@@ -187,7 +199,12 @@ health() { curl -s -m 15 -o /dev/null -w '%{http_code}' \
 
 # --- b2 kit -----------------------------------------------------------------
 kit_url() {
-  [ -f "$B2_ENV" ] || die "no B2 credentials at $B2_ENV (set NINFER_B2_ENV)"
+  # Public path: the GitHub release. Used whenever B2 credentials are absent,
+  # which is the normal case for anyone who did not build the kit themselves.
+  if [ ! -f "$B2_ENV" ]; then
+    printf '%s\n' "$KIT_RELEASE_URL"
+    return 0
+  fi
   ( set -a; . "$B2_ENV"; set +a
     : "${B2_KEY_ID:?}" "${B2_APPLICATION_KEY:?}" "${B2_BUCKET_NAME:?}"
     auth=$(curl -fsS -u "$B2_KEY_ID:$B2_APPLICATION_KEY" \
@@ -206,7 +223,7 @@ print(s["apiUrl"], s["downloadUrl"], s["bucketId"], d["authorizationToken"])')"
 install_kit() {  # unpack the kit and write the real argv; run on the box
   { printf 'KIT_URL=%q\nKIT_SHA1=%q\nAPIKEY=%q\n' "$(kit_url)" "$KIT_SHA1" "$NINFER_API_KEY"; cat <<'EOS'
 set -e
-curl -fsS -o /root/kit.tar.gz "$KIT_URL"
+curl -fsSL -o /root/kit.tar.gz "$KIT_URL"
 got=$(sha1sum /root/kit.tar.gz | cut -d' ' -f1)
 [ "$got" = "$KIT_SHA1" ] || { echo "sha1 mismatch: $got"; exit 1; }
 tar xzf /root/kit.tar.gz -C /root && rm -f /root/kit.tar.gz
