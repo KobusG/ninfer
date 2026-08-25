@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_REPO="${NINFER_SOURCE_REPO:-https://github.com/KobusG/ninfer-engine.git}"
+SOURCE_REF="${NINFER_SOURCE_REF:-775538c646eb2e29928e3c7de1716a33235e7c85}"
+IMAGE="${NINFER_IMAGE_REPOSITORY:-ghcr.io/kobusg/ninfer-sm120a-quant-kv}"
+TAG=
+PUSH=0
+
+usage() {
+  cat <<'EOF'
+usage: ./build-image [--ref COMMIT] [--image REPOSITORY] [--tag TAG] [--push]
+
+Builds the model-free sm_120a NInfer runtime locally. The source ref must be a
+full commit hash from KobusG/ninfer-engine. --push publishes the tagged image;
+authenticate to GHCR first.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ref)   [ "$#" -ge 2 ] || { usage >&2; exit 2; }; SOURCE_REF=$2; shift 2 ;;
+    --image) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; IMAGE=$2; shift 2 ;;
+    --tag)   [ "$#" -ge 2 ] || { usage >&2; exit 2; }; TAG=$2; shift 2 ;;
+    --push)  PUSH=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'error: unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  printf 'error: --ref must be a full 40-character commit hash\n' >&2
+  exit 2
+}
+
+TAG="${TAG:-${SOURCE_REF:0:8}-rk4v4e8-vision8k}"
+IMAGE_REF="$IMAGE:$TAG"
+
+printf 'building %s\nsource: %s@%s\n' "$IMAGE_REF" "$SOURCE_REPO" "$SOURCE_REF"
+docker build \
+  --platform linux/amd64 \
+  --file "$ROOT/Dockerfile" \
+  --build-arg "NINFER_REPO=$SOURCE_REPO" \
+  --build-arg "NINFER_REF=$SOURCE_REF" \
+  --tag "$IMAGE_REF" \
+  "$ROOT"
+
+docker run --rm --entrypoint /bin/sh "$IMAGE_REF" -ec '
+  test -x /root/ninfer-5090/build-sm120a/apps/ninfer
+  test -x /root/ninfer-5090/build-sm120a/apps/ninfer-serve
+  test -x /usr/local/bin/ninfer
+  test -x /usr/local/bin/ninfer-serve
+  test -f /usr/share/doc/ninfer/BUILDINFO
+  test -f /usr/share/doc/ninfer/LICENSE
+'
+
+printf 'built and layout-checked: %s\n' "$IMAGE_REF"
+if [ "$PUSH" -eq 1 ]; then
+  docker push "$IMAGE_REF"
+  docker buildx imagetools inspect "$IMAGE_REF"
+fi

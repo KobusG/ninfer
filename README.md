@@ -53,6 +53,39 @@ requests — **5.67×** its single-request throughput, where the integer profile
 `NINFER_MODEL=qwen38-27b` to run the same checkpoint the 3090 runs, if you want the comparison
 without the variable.
 
+### 24 GB Blackwell profile
+
+`rtx6000pro-21gb/` is the Qwen3.8-27B path capped at 21 GiB for 24 GB-class **Blackwell** cards. It requires
+compute capability `sm_120a`; it is not compatible with RTX 6000 Ada or RTX A6000. The model-free
+runtime image is pinned by digest in `rtx6000pro-21gb/ninfer` and downloads the model at provisioning time:
+
+```
+ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c9285445c49e655d0363268e6bcc21cd52b1b4283e7fca2da6c864d4d350cb57
+```
+
+The default profile is Qwen3.8-27B groupwise-int, `rk4v4-e8` KV, 145,920-token explicit shared
+KV capacity, MTP3, concurrency 2, vision enabled and an 8K vision-token workspace. On an RTX PRO
+5000 Blackwell its measured peak was exactly 21,504 MiB (21 GiB), including a real image request.
+This leaves about 3 GiB of a 24 GiB card for the driver and other applications. Context and vision
+budgets are runtime settings; override `NINFER_MAX_CONTEXT`, `NINFER_KV_CAPACITY`, or
+`NINFER_VISION_MAX_TOKENS` without rebuilding the image.
+
+The maximum profile passed a 135,311-token multimodal needle test, returning both the image title
+and the buried code exactly. At that profile C1 decode was 103.0 tok/s and C2 aggregate was
+129.3 tok/s, with 59.6-63.9% MTP acceptance. Earlier 16K text-only controls on the same host were:
+
+| KV | MTP | Resident/peak | C1 decode | C2 aggregate |
+| --- | --- | ---: | ---: | ---: |
+| `int8` | off | 17,990 MiB | 60.5 tok/s | 101.7 tok/s |
+| `rk4v4-e8` | off | 17,734 MiB | 60.2 tok/s | 95.9 tok/s |
+| `int8` | MTP3 | 18,812 MiB | 106.2 tok/s | 127.2 tok/s |
+| `rk4v4-e8` | MTP3 | 18,542 MiB | 95.7-108.2 tok/s | 122.7-128.0 tok/s |
+
+Builds happen locally and are published to GHCR; `rtx6000pro-21gb/ninfer build` deliberately refuses
+to compile on a rented GPU. See [`rtx6000pro-21gb/VALIDATION.md`](rtx6000pro-21gb/VALIDATION.md) for
+the local image build/publish workflow plus image-inference, memory telemetry, throughput and
+long-context validation procedures.
+
 Upstream's 3090 notes also mention that their Linux validation ran without a real model artifact,
 so no Linux throughput figures were published. These binaries have been run against the real
 18.2 GB Qwen3.8-27B checkpoint on Ubuntu 24.04 — see [Verified on](#verified-on) below.

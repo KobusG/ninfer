@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# ninfer — run Qwen3.6-27B NVFP4 on a rented Vast.ai RTX 5090, and pay nothing when idle.
+# ninfer — Qwen3.8-27B workflow capped at 21 GiB for RTX Pro Blackwell hosts.
 #
-#   ninfer create   rent a fresh 5090 and provision it from scratch
+#   ninfer create   rent a fresh test GPU and provision it from scratch
 #   ninfer provision finish a box that create left half-built
 #   ninfer destroy  delete the instance entirely — idle cost goes to $0.00
 #   ninfer up       resume a STOPPED instance (~2 min, only if one exists)
 #   ninfer down     stop an instance (keeps the disk, still bills for it)
 #   ninfer status   state, endpoint, hourly cost, health
-#   ninfer offers   list the 5090s worth renting right now
+#   ninfer offers   list compatible low-VRAM GPUs worth renting right now
 #   ninfer ssh      shell on the box
 #   ninfer log      tail the server log
 #   ninfer bench    measure decode throughput across concurrency levels
-#   ninfer build    compile sm_120a binaries on the current box
-#   ninfer kit-pack package this box's binaries and pull the tarball down here
 #   ninfer kit-url  download URL for the prebuilt binaries
 #   ninfer restore  reinstall those binaries on the current box
 #
@@ -32,6 +30,12 @@ SELF_DIR=$(cd -P "$(dirname "$_src")" && pwd)
 SELF="$SELF_DIR/${_src##*/}"   # absolute — usage is printed after cd "$PROJ"
 
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
+cd "$PROJ"
+ENV_FILE="${NINFER_ENV_FILE:-$PROJ/.env}"
+set -a; . "$ENV_FILE"; set +a
+: "${VAST_API_KEY:?missing VAST_API_KEY in $ENV_FILE}"
+: "${NINFER_API_KEY:?missing NINFER_API_KEY in $ENV_FILE}"
+
 STATE="$PROJ/.ninfer-instance"
 BADHOSTS="$PROJ/.ninfer-badhosts"   # machines that failed to start; skipped by pick_offer
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/kobus}"
@@ -42,26 +46,30 @@ CONFIGS=(
 # Which provider key in those configs this card owns. Separate from the 3090's
 # "ninfer" entry on purpose: the two serve different artifacts under different
 # model ids, and only one is ever live.
-PROVIDER="${NINFER_PROVIDER:-ninfer5090}"
+PROVIDER="${NINFER_PROVIDER:-ninfer6000pro21gb}"
 
-# What a fresh box gets built from. Upstream rejects any CUDA older than 13.1
-# and any architecture other than 120a, so the devel image and the offer filter
-# below are both load-bearing, not preferences.
-IMAGE="nvidia/cuda:13.1.2-devel-ubuntu24.04"
+# The default rental target has 24GB-class VRAM like the target VPS.
+IMAGE="${NINFER_IMAGE:-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c9285445c49e655d0363268e6bcc21cd52b1b4283e7fca2da6c864d4d350cb57}"
 CUDA_MIN=13.1
 ARCH=120a
 DISK_GB="${NINFER_DISK:-80}"
-SRC_REPO="https://github.com/Neroued/ninfer.git"
-SRC_BRANCH="${NINFER_SRC_BRANCH:-master}"
 APPS=/root/ninfer-5090/build-sm120a/apps
 ARGV_FILE=/root/ninfer-argv-new.txt
 SUPERVISE=/root/ninfer-supervise.sh
+TARGET_GPU="${NINFER_GPU_NAME:-RTX PRO 4000}"
+KV_DTYPE="${NINFER_KV_DTYPE:-rk4v4-e8}"
+MAX_CONTEXT="${NINFER_MAX_CONTEXT:-145920}"
+KV_CAPACITY="${NINFER_KV_CAPACITY:-145920}"
+MAX_CONCURRENCY="${NINFER_MAX_CONCURRENCY:-2}"
+PREFILL_CHUNK="${NINFER_PREFILL_CHUNK:-1024}"
+SPEC_MODE="${NINFER_SPEC:-mtp}"
+DRAFT_TOKENS="${NINFER_DRAFT_TOKENS:-3}"
+VISION="${NINFER_VISION:-1}"
+VISION_MAX_TOKENS="${NINFER_VISION_MAX_TOKENS:-8192}"
 
 # Upstream accepts a closed set of artifacts and nothing else. These are the
-# four worth running on 32 GB, with the size and SHA-256 upstream publishes for
-# each. NVFP4 is the default because it is the one thing a 5090 can do that a
-# 3090 physically cannot — W4A4 tensor cores — and it scales 5.67x from one
-# concurrent request to eight, where the int profile manages 2.88x.
+# four supported artifacts, with the size and SHA-256 upstream publishes for
+# each. Qwen3.8 groupwise-int is the default for this low-VRAM workflow.
 case "${NINFER_MODEL:-qwen38-27b}" in
   nvfp4-27b)  HF_REPO=neroued/Qwen3.6-27B-nvfp4-NInfer; HF_FILE=qwen3_6_27b_nvfp4.ninfer
               MODEL_SHA=bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a; MODEL_GIB=17.07 ;;
@@ -75,21 +83,13 @@ case "${NINFER_MODEL:-qwen38-27b}" in
        "$NINFER_MODEL" >&2; exit 1 ;;
 esac
 MODEL_KEY="${NINFER_MODEL:-qwen38-27b}"
-LABEL="ninfer-5090-$MODEL_KEY"
+LABEL="ninfer-rtx6000pro-21gb-$MODEL_KEY"
 
-# Prebuilt sm_120a binaries. Upstream ships none — no releases, no tags, and
-# their README says outright that there is no packaged binary distribution — so
-# the kit below is one this project built and published. Blank KIT_SHA1 to fall
-# back to compiling on the box, which is what happens before any kit exists.
+# Optional tar kit fallback for images without bundled binaries.
 B2_ENV="${NINFER_B2_ENV:-/Users/mike/coding/python_3/my_projects/awakedesk/.env}"
 KIT_KEY="${NINFER_KIT_KEY:-}"
-KIT_SHA1="${NINFER_KIT_SHA1:-0a7560e3d9c526ef6b6ab1f1ca139a9101a50a6f}"
-KIT_RELEASE_URL="${NINFER_KIT_URL:-https://github.com/coder903/ninfer/releases/download/rtx5090-linux-sm120a-feaf4dd0/ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz}"
-
-cd "$PROJ"
-set -a; . ./.env; set +a
-: "${VAST_API_KEY:?missing VAST_API_KEY in $PROJ/.env}"
-: "${NINFER_API_KEY:?missing NINFER_API_KEY in $PROJ/.env}"
+KIT_SHA1="${NINFER_KIT_SHA1:-}"
+KIT_RELEASE_URL="${NINFER_KIT_URL:-}"
 
 # Instance id: env override > saved state > none (create one).
 INSTANCE="${NINFER_INSTANCE:-$( [ -f "$STATE" ] && cat "$STATE" || true )}"
@@ -200,37 +200,40 @@ import sys, json, os
 disk = float(os.environ.get("DISK", "80"))
 bad = {t for t in os.environ.get("BAD", "").split(",") if t}
 cuda = float(os.environ.get("CUDA_MIN", "13.1"))
+gpu = os.environ.get("GPU", "RTX PRO 4000")
 o = json.load(sys.stdin).get("offers", [])
 ok = [x for x in o
-      if (x.get("disk_space") or 0) >= disk + 10
+      if x.get("gpu_name") == gpu
+      and (x.get("disk_space") or 0) >= disk + 10
       and (x.get("inet_down") or 0) >= 1000
-      and (x.get("reliability2") or 0) >= 0.995
+      and (x.get("reliability2") or 0) >= 0.99
       and (x.get("cuda_max_good") or 0) >= cuda
-      and (x.get("gpu_ram") or 0) >= 31000
+      and (x.get("gpu_ram") or 0) >= 23000
       and str(x.get("machine_id")) not in bad]
 ok.sort(key=lambda x: x["dph_total"])
 '
 
-OFFER_Q='{"gpu_name":{"eq":"RTX 5090"},"num_gpus":{"eq":1},"rentable":{"eq":true},"order":[["dph_total","asc"]],"limit":500}'
+OFFER_Q=$(printf '{"gpu_name":{"eq":"%s"},"cuda_max_good":{"gte":%s},"num_gpus":{"eq":1},"rentable":{"eq":true},"order":[["dph_total","asc"]],"limit":500}' \
+  "$TARGET_GPU" "$CUDA_MIN")
 
 pick_offer() {  # echoes: id dph down loc
   curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
-if not ok: sys.exit("no offer matches (need >=%dGB disk, >=1Gbps, CUDA %s+, reliability >=0.995)" % (disk, cuda))
+  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" GPU="$TARGET_GPU" python3 -c "$OFFER_FILTER"'
+if not ok: sys.exit("no offer matches (need %s, >=%dGB disk, >=1Gbps, CUDA %s+, reliability >=0.99)" % (gpu, disk, cuda))
 x = ok[0]
 print(x["id"], "%.4f" % x["dph_total"], "%.0f" % (x.get("inet_down") or 0), x.get("geolocation"))'
 }
 
 cmd_offers() {
-  step "rentable RTX 5090s (>= ${DISK_GB}+10 GB disk, >= 1 Gbps, CUDA ${CUDA_MIN}+, reliability >= 0.995)"
+  step "rentable $TARGET_GPU (>= ${DISK_GB}+10 GB disk, >= 1 Gbps, CUDA ${CUDA_MIN}+, reliability >= 0.99)"
   curl -fsG -H "Authorization: Bearer $VAST_API_KEY" --data-urlencode "q=$OFFER_Q" "$API_BASE/bundles/" \
-  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" python3 -c "$OFFER_FILTER"'
+  | DISK="$DISK_GB" BAD="$(bad_machines)" CUDA_MIN="$CUDA_MIN" GPU="$TARGET_GPU" python3 -c "$OFFER_FILTER"'
 print("  %-9s %8s %11s %9s %6s  %s" % ("offer", "gpu/hr", "stor/GB/mo", "down", "rel", "location"))
 for x in ok[:10]:
     print("  %-9s $%.4f  $%9.4f %6.0fMb %6.4f  %s" % (
         x["id"], x["dph_total"], x.get("storage_cost") or 0,
         x.get("inet_down") or 0, x.get("reliability2") or 0, x.get("geolocation")))
-if not ok: print("  none right now — 5090s with CUDA 13.1 are a thin slice of the market")'
+if not ok: print("  none right now — compatible CUDA 13.1+ low-VRAM boxes are a thin slice of the market")'
 }
 
 # --- opencode config --------------------------------------------------------
@@ -238,9 +241,9 @@ repoint() {
   local url="$1" mid="${2:-}" cfg
   for cfg in "${CONFIGS[@]}"; do
     [ -f "$cfg" ] || { info "skip (missing): $cfg"; continue; }
-    PROVIDER="$PROVIDER" python3 - "$cfg" "$url" "$mid" <<'PY'
+    PROVIDER="$PROVIDER" python3 - "$cfg" "$url" "$mid" "$MAX_CONTEXT" <<'PY'
 import json, sys, os, collections
-cfg, url, mid = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg, url, mid, max_context = sys.argv[1:5]
 key = os.environ["PROVIDER"]
 d = json.load(open(cfg), object_pairs_hook=collections.OrderedDict)
 provs = d.setdefault("provider", collections.OrderedDict())
@@ -248,7 +251,7 @@ fresh = key not in provs
 prov = provs.setdefault(key, collections.OrderedDict())
 
 prov["npm"] = "@ai-sdk/openai-compatible"
-prov.setdefault("name", "NInfer RTX 5090")
+prov.setdefault("name", "NInfer RTX6000 Pro 21GB")
 opts = prov.setdefault("options", collections.OrderedDict())
 old = opts.get("baseURL")
 opts["baseURL"] = url
@@ -260,9 +263,9 @@ models = prov.setdefault("models", collections.OrderedDict())
 if mid and list(models) != [mid]:
     models.clear()
     models[mid] = collections.OrderedDict([
-        ("name", "%s [NInfer 5090]" % mid),
+        ("name", "%s [NInfer RTX6000 Pro 21GB]" % mid),
         ("model", mid),
-        ("limit", collections.OrderedDict([("context", 32768), ("output", 8192)])),
+        ("limit", collections.OrderedDict([("context", int(max_context)), ("output", 8192)])),
     ])
 
 json.dump(d, open(cfg, "w"), indent=2); open(cfg, "a").write("\n")
@@ -280,15 +283,15 @@ else:
     print("             server named no model - set one by hand")
 PY
   done
-  python3 - "$url" <<'PY'
+  python3 - "$url" "$ENV_FILE" <<'PY'
 import re, sys
-s = open(".env").read()
+s = open(sys.argv[2]).read()
 new = "NINFER_BASE_URL=" + sys.argv[1]
 s = re.sub(r'^NINFER_BASE_URL=.*$', new, s, flags=re.M) if re.search(
     r'^NINFER_BASE_URL=', s, flags=re.M) else s.rstrip("\n") + "\n" + new + "\n"
-open(".env", "w").write(s)
+open(sys.argv[2], "w").write(s)
 PY
-  info "updated:   $PROJ/.env"
+  info "updated:   $ENV_FILE"
 }
 
 health() { curl -s -m 15 -o /dev/null -w '%{http_code}' \
@@ -354,98 +357,8 @@ EOS
   } | box 'bash -s'
 }
 
-# --- building from source ---------------------------------------------------
-# Upstream distributes source only, so this is the path that exists on day one.
-# It runs on the rented box because the build needs an sm_120a device present
-# and CUDA 13.1; it cannot be cross-built from the Mac.
 cmd_build() {
-  need_instance
-  step "compiling sm_${ARCH} binaries on instance $INSTANCE"
-  info "this takes roughly 15-25 minutes and runs detached — 'ninfer log-build' to watch"
-  { printf 'SRC_REPO=%q\nSRC_BRANCH=%q\nARCH=%q\nAPPS=%q\n' "$SRC_REPO" "$SRC_BRANCH" "$ARCH" "$APPS"; cat <<'EOS'
-set -e
-cat > /root/build-ninfer.sh <<INNER
-#!/usr/bin/env bash
-set -e
-export DEBIAN_FRONTEND=noninteractive
-SRC_REPO="$SRC_REPO"; SRC_BRANCH="$SRC_BRANCH"; ARCH="$ARCH"; APPS="$APPS"
-INNER
-cat >> /root/build-ninfer.sh <<'INNER'
-# Provisioning owns apt. Two apt-get runs at once deadlock on the dpkg lock,
-# and both start within seconds of each other, so wait for its marker instead
-# of installing anything here.
-echo "[$(date -u +%T)] waiting for provisioning to finish installing deps"
-w=0
-until [ -f /root/deps.done ]; do
-  [ "$w" -ge 900 ] && { echo "deps never landed - see /root/provision.log"; exit 1; }
-  sleep 5; w=$((w+5))
-done
-echo "[$(date -u +%T)] deps ready after ${w}s"
-cmake --version | head -1
-
-echo "[$(date -u +%T)] clone $SRC_BRANCH"
-rm -rf /root/src
-git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_REPO" /root/src
-REV=$(git -C /root/src rev-parse HEAD)
-echo "[$(date -u +%T)] rev $REV"
-
-echo "[$(date -u +%T)] configure (arch $ARCH)"
-cmake -S /root/src -B /root/build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
-  -DNINFER_BUILD_APPS=ON \
-  -DBUILD_TESTING=OFF \
-  -DNINFER_BUILD_BENCHMARKS=OFF
-
-echo "[$(date -u +%T)] compile with $(nproc) jobs"
-START=$(date +%s)
-cmake --build /root/build --parallel --target ninfer ninfer-serve
-SECS=$(( $(date +%s) - START ))
-echo "[$(date -u +%T)] compiled in ${SECS}s"
-
-mkdir -p "$APPS" /root/kit/bin
-for b in ninfer ninfer-serve; do
-  cp "/root/build/apps/$b" "/root/kit/bin/$b"
-  cp "/root/build/apps/$b" "$APPS/$b.new"; chmod +x "$APPS/$b.new"; mv -f "$APPS/$b.new" "$APPS/$b"
-done
-
-# Everything a reader needs to reproduce this exact tarball, and everything
-# Apache-2.0 attribution has to state.
-cat > /root/kit/BUILDINFO.txt <<INFO
-project        Neroued/ninfer
-source         $SRC_REPO
-branch         $SRC_BRANCH
-revision       $REV
-architecture   sm_$ARCH
-cuda           $(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')
-driver         $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-gpu            $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-image          nvidia/cuda:13.1.2-devel-ubuntu24.04
-host           Vast.ai, Ubuntu 24.04
-jobs           $(nproc)
-build_seconds  $SECS
-built_utc      $(date -u +%Y-%m-%dT%H:%M:%SZ)
-INFO
-cp /root/src/LICENSE /root/kit/LICENSE-Apache-2.0.txt
-echo "[$(date -u +%T)] BUILD_DONE"
-cat /root/kit/BUILDINFO.txt
-INNER
-chmod +x /root/build-ninfer.sh
-setsid nohup /root/build-ninfer.sh > /root/build.log 2>&1 < /dev/null &
-echo "build started"
-EOS
-  } | box 'bash -s'
-
-  local waited=0
-  until box 'grep -q BUILD_DONE /root/build.log' 2>/dev/null; do
-    box 'grep -q "^ninja: build stopped\|CMake Error\|Error 1$" /root/build.log' 2>/dev/null && \
-      die "build failed — ninfer ssh, then: tail -40 /root/build.log"
-    [ "$waited" -ge 3600 ] && die "build stalled — ninfer ssh, then: tail /root/build.log"
-    printf '\r  %s (%ds)   ' "$(box 'tail -1 /root/build.log 2>/dev/null | cut -c1-64' 2>/dev/null || echo '…')" "$waited"
-    sleep 20; waited=$((waited+20))
-  done
-  info "built (${waited}s)"
-  box 'cat /root/kit/BUILDINFO.txt' | sed 's/^/  /'
+  die "GPU-instance builds are disabled; build and publish the runtime image locally"
 }
 
 cmd_kit_pack() {  # tar the built binaries and bring the tarball back here
@@ -454,7 +367,7 @@ cmd_kit_pack() {  # tar the built binaries and bring the tarball back here
   local rev short name out
   rev=$(box "sed -n 's/^revision *//p' /root/kit/BUILDINFO.txt")
   short="${rev:0:12}"
-  name="ninfer-5090-kit-${short}-sm${ARCH}.tar.gz"
+    name="ninfer-rtx6000pro-21gb-kit-${short}-sm${ARCH}.tar.gz"
   out="$PROJ/dist/$name"
   mkdir -p "$PROJ/dist"
 
@@ -478,30 +391,18 @@ cmd_kit_pack() {  # tar the built binaries and bring the tarball back here
 # The argv lives here rather than inside the kit so that changing a serving flag
 # does not mean rebuilding and republishing a 400 MB tarball.
 write_argv() {
-  box "cat > $ARGV_FILE" <<PY
-$APPS/ninfer-serve
-/root/models/$HF_FILE
---host
-0.0.0.0
---port
-8080
---api-key
-$NINFER_API_KEY
---max-context
-32768
---kv-capacity
-auto
---kv-dtype
-int8
---max-concurrency
-8
---spec
-mtp
---draft-tokens
-3
---lm-head-draft
---no-thinking
-PY
+  {
+    printf '%s\n' "$APPS/ninfer-serve" "/root/models/$HF_FILE"
+    printf '%s\n' --host 0.0.0.0 --port 8080 --api-key "$NINFER_API_KEY"
+    printf '%s\n' --max-context "$MAX_CONTEXT" --kv-capacity "$KV_CAPACITY" --kv-dtype "$KV_DTYPE"
+    printf '%s\n' --max-concurrency "$MAX_CONCURRENCY" --prefill-chunk "$PREFILL_CHUNK" --no-thinking
+    if [ "$VISION" = 1 ]; then
+      printf '%s\n' --vision --vision-max-tokens "$VISION_MAX_TOKENS"
+    fi
+    if [ "$SPEC_MODE" != none ]; then
+      printf '%s\n' --spec "$SPEC_MODE" --draft-tokens "$DRAFT_TOKENS" --lm-head-draft
+    fi
+  } | box "tee $ARGV_FILE >/dev/null"
   box "chmod 600 $ARGV_FILE"
 }
 
@@ -625,7 +526,7 @@ cmd_status() {
   step "instance $INSTANCE — $(field gpu_name) — $s"
   info "label:   $(field label)"
   info "model:   $HF_FILE (${MODEL_GIB} GiB)"
-  info "kit:     $(have_kit && echo 'prebuilt' || echo 'none published — builds from source')"
+  info "runtime: $IMAGE"
   info "rate:    \$$(printf '%.4f' "$(field dph_total)")/hr running"
   info "         \$$(printf '%.4f' "$(field storage_total_cost)")/hr stopped (disk only)"
   info "disk:    $(field disk_usage) GB used of $(field disk_space) GB"
@@ -641,7 +542,7 @@ cmd_create() {
   [ -n "$INSTANCE" ] && [ "$(field actual_status 2>/dev/null || true)" != "" ] && \
     die "instance $INSTANCE already exists — 'ninfer up' to resume it, or 'ninfer destroy' first"
 
-  step "1/3  picking a 5090"
+  step "1/3  picking a $TARGET_GPU"
   local offer dph down loc
   if [ -n "${1:-}" ]; then
     offer="$1"; dph="?"; down="?"; loc="(chosen by hand — see 'ninfer offers')"
@@ -694,14 +595,6 @@ HF_REPO="$HF_REPO"; HF_FILE="$HF_FILE"; MODEL_SHA="$MODEL_SHA"
 INNER
 cat >> /root/provision-ninfer.sh <<'INNER'
 export DEBIAN_FRONTEND=noninteractive
-echo "[$(date -u +%T)] apt deps"
-apt-get update -qq
-# Runtime libs and the build toolchain in one transaction, because the build
-# script runs concurrently and must not touch apt itself.
-apt-get install -y -qq --no-install-recommends \
-  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  libcurl4-openssl-dev python3-venv python3-pip ca-certificates curl \
-  git cmake ninja-build pkg-config
 touch /root/deps.done
 echo "[$(date -u +%T)] DEPS_DONE"
 echo "[$(date -u +%T)] hf client"
@@ -723,13 +616,13 @@ echo "provisioning started"
 EOS
   } | box 'bash -s'
 
-  if have_kit; then
+  if box "test -x $APPS/ninfer-serve" 2>/dev/null; then
+    pstep "using binaries bundled in the runtime image"
+  elif have_kit; then
     pstep "installing the prebuilt binaries"
     install_kit
   else
-    pstep "no prebuilt kit — compiling from source"
-    info "upstream ships no binaries, so the first run on a box builds them"
-    cmd_build
+    die "runtime image has no ninfer-serve binary and no fallback kit is configured"
   fi
 
   pstep "waiting on the model download"
@@ -751,7 +644,6 @@ cmd_destroy() {
   local s; s=$(field actual_status 2>/dev/null || echo unknown)
   step "destroying instance $INSTANCE (currently $s)"
   info "this deletes the disk — the ${MODEL_GIB} GiB model will be re-downloaded next time"
-  have_kit || info "and, with no published kit, the binaries will be recompiled — 'ninfer kit-pack' first if you want to keep them"
   curl -fsS -X DELETE -H "Authorization: Bearer $VAST_API_KEY" "$API_BASE/instances/${INSTANCE}/" >/dev/null
   # only forget the saved id if that is the one we just deleted — a
   # NINFER_INSTANCE override must not clear the tracked instance
@@ -798,6 +690,5 @@ case "${1:-status}" in
   restore)   install_kit ;;
   ssh)       shift; read -r h p < <(ssh_target); exec ssh "${SSH_OPTS[@]}" -p "$p" "root@$h" "$@" ;;
   log)       box 'tail -n 40 -f /root/serve.log' ;;
-  log-build) box 'tail -n 40 -f /root/build.log' ;;
   *)         sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

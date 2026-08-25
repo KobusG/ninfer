@@ -1,0 +1,60 @@
+services:
+  qwen:
+    image: ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c9285445c49e655d0363268e6bcc21cd52b1b4283e7fca2da6c864d4d350cb57
+    init: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+    volumes:
+      - qwen-models:/models
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        model=/models/qwen3_8_27b.ninfer
+        sha=eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e
+
+        if ! printf '%s  %s\n' "$$sha" "$$model" | sha256sum --check --status; then
+          rm -f "$$model"
+          if [ ! -x /models/.hfenv/bin/hf ]; then
+            python3 -m venv /models/.hfenv
+            /models/.hfenv/bin/pip --quiet install --upgrade pip "huggingface_hub[hf_transfer]"
+          fi
+          /models/.hfenv/bin/hf download \
+            neroued/Qwen3.8-27B-NInfer qwen3_8_27b.ninfer \
+            --local-dir /models
+          printf '%s  %s\n' "$$sha" "$$model" | sha256sum --check
+        fi
+
+        auth=()
+        if [ -n "$${CHAT_API_KEY:-}" ]; then
+          auth=(--api-key "$$CHAT_API_KEY")
+        fi
+
+        exec ninfer-serve "$$model" \
+          --model-id qwen3.8-27b \
+          --host 0.0.0.0 --port 8080 "$${auth[@]}" \
+          --max-context 145920 --kv-capacity 145920 \
+          --kv-dtype rk4v4-e8 --max-concurrency 2 --prefill-chunk 512 \
+          --vision --vision-max-tokens 8192 \
+          --spec mtp --draft-tokens 3 --lm-head-draft --no-thinking
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 90s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  qwen-models:
