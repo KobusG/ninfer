@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_IMAGE_URL = (
+    "https://raw.githubusercontent.com/UDPSendToFailed/ninfer-4090/"
+    "11aae2d6342d1fbdc7ef2b9ee17096858be44271/examples/cli/media/visual_chart.png"
+)
+
+
+def request_json(url, headers, body, timeout):
+    request = urllib.request.Request(url, json.dumps(body).encode(), headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:1000]
+        raise RuntimeError(f"HTTP {error.code}: {detail}") from error
+
+
+def records(count, needle, needle_index):
+    rows = [
+        f"Record {i}: code ITEM-{i:06d}; payload alpha beta gamma delta epsilon zeta eta theta."
+        for i in range(count)
+    ]
+    rows[needle_index] = f"Record {needle_index}: code {needle}; payload alpha beta gamma delta."
+    return "\n".join(rows)
+
+
+def multimodal(text, image_url):
+    return [
+        {"type": "image_url", "image_url": {"url": image_url}},
+        {"type": "text", "text": text},
+    ]
+
+
+def stream_request(url, headers, body, timeout):
+    request = urllib.request.Request(url, json.dumps(body).encode(), headers)
+    started = time.monotonic()
+    first = None
+    usage = None
+    pieces = []
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                event = json.loads(data)
+                if event.get("usage"):
+                    usage = event["usage"]
+                for choice in event.get("choices") or []:
+                    text = (choice.get("delta") or {}).get("content") or ""
+                    if text:
+                        first = first or time.monotonic()
+                        pieces.append(text)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:1000]
+        raise RuntimeError(f"HTTP {error.code}: {detail}") from error
+    return "".join(pieces), usage or {}, started, first, time.monotonic()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark an OpenAI-compatible endpoint near full context with image validation.")
+    parser.add_argument("endpoint", help="API root, for example http://host:port/v1")
+    parser.add_argument("--context", type=int, default=os.getenv("NINFER_MAX_CONTEXT"), required=not os.getenv("NINFER_MAX_CONTEXT"))
+    parser.add_argument("--api-key", default=os.getenv("NINFER_API_KEY") or os.getenv("CHAT_API_KEY"))
+    parser.add_argument("--model", help="model ID; defaults to the first /models result")
+    parser.add_argument("--image-url", default=DEFAULT_IMAGE_URL)
+    parser.add_argument("--image-marker", default="NIFER VISION 731")
+    parser.add_argument("--needle", default="FULL-CONTEXT-NEEDLE")
+    parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--safety-tokens", type=int, default=2048)
+    parser.add_argument("--timeout", type=int, default=1800)
+    args = parser.parse_args()
+    base = args.endpoint.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    headers = {"Content-Type": "application/json"}
+    if args.api_key:
+        headers["Authorization"] = "Bearer " + args.api_key
+    if args.model:
+        model = args.model
+    else:
+        request = urllib.request.Request(base + "/models", headers=headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            model = json.load(response)["data"][0]["id"]
+
+    def calibrate(count):
+        body = {"model": model, "messages": [{"role": "user", "content": multimodal(
+            f"{records(count, args.needle, count // 2)}\nReply with OK.", args.image_url)}],
+            "max_tokens": 1, "temperature": 0}
+        return int(request_json(base + "/chat/completions", headers, body, args.timeout)["usage"]["prompt_tokens"])
+
+    print(f"endpoint: {base}\nmodel:    {model}")
+    print("calibrating tokenizer against the endpoint...", flush=True)
+    p1, p2 = calibrate(256), calibrate(512)
+    slope = (p2 - p1) / 256
+    intercept = p1 - slope * 256
+    target = args.context - args.max_tokens - args.safety_tokens
+    count = max(1, int((target - intercept) / slope))
+    needle_index = count * 2 // 3
+    prompt = records(count, args.needle, needle_index) + (
+        f"\nRead the image. First output exactly `{args.image_marker} | {args.needle}`. "
+        "Then explain paged KV-cache allocation, fragmentation, prefix reuse and eviction."
+    )
+    body = {"model": model, "messages": [{"role": "user", "content": multimodal(prompt, args.image_url)}],
+            "max_tokens": args.max_tokens, "temperature": 0, "stream": True,
+            "stream_options": {"include_usage": True}}
+    estimated = int(intercept + slope * count)
+    print(f"context:  {args.context:,}\ntarget:   {target:,} prompt tokens")
+    print(f"records:  {count:,} (estimated {estimated:,} prompt tokens)")
+    print("running full-context multimodal request...", flush=True)
+    text, usage, started, first, ended = stream_request(base + "/chat/completions", headers, body, args.timeout)
+    if first is None:
+        raise RuntimeError("stream completed without content")
+    prompt_tokens = int(usage.get("prompt_tokens", estimated))
+    completion_tokens = int(usage.get("completion_tokens", 0))
+    ttft = first - started
+    wall = ended - started
+    decode_seconds = max(ended - first, 1e-9)
+    image_ok = args.image_marker in text
+    needle_ok = args.needle in text
+    print(f"\nprompt tokens:      {prompt_tokens:,}")
+    print(f"completion tokens:  {completion_tokens:,}" if completion_tokens else "completion tokens:  unavailable")
+    print(f"context utilization:{100 * (prompt_tokens + completion_tokens) / args.context:8.2f}%")
+    print(f"TTFT:               {ttft:8.2f} s")
+    print(f"prefill throughput: {prompt_tokens / ttft:8.1f} tok/s (client approximation)")
+    if completion_tokens:
+        print(f"decode throughput:  {completion_tokens / decode_seconds:8.1f} tok/s (client observed)")
+        print(f"end-to-end output:  {completion_tokens / wall:8.3f} tok/s")
+    print(f"wall time:          {wall:8.2f} s")
+    print(f"image validation:   {'PASS' if image_ok else 'FAIL'}")
+    print(f"needle validation:  {'PASS' if needle_ok else 'FAIL'}")
+    print(f"response prefix:    {text[:240]!r}")
+    if not image_ok or not needle_ok or prompt_tokens + completion_tokens > args.context:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, urllib.error.URLError, KeyError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(1)

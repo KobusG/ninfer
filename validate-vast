@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+COMPOSE_FILE=
+SERVICE=qwen
+DISK_GB=80
+WAIT=1
+DRY_RUN=0
+STATE_DIR="$ROOT"
+ENV_FILE="${NINFER_ENV_FILE:-}"
+
+usage() {
+  cat <<'EOF'
+usage: ./validate-vast --compose PROFILE/compose.yaml OFFER_ID [options]
+
+Launch a Compose profile on a specific on-demand Vast offer. The ID is an
+offer ID from `vastai search offers`, not an existing contract ID.
+
+options:
+  --compose FILE   Compose file to render and launch
+  --service NAME   Compose service (default: qwen)
+  --disk GB        Vast disk size (default: 80)
+  --state-dir DIR  Where to save validation state (default: repo root)
+  --env-file FILE  Compose interpolation environment file
+  --no-wait        Create the instance without waiting for the API
+  --dry-run        Print the equivalent Vast CLI command
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --compose) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; COMPOSE_FILE=$2; shift 2 ;;
+    --service) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; SERVICE=$2; shift 2 ;;
+    --disk) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; DISK_GB=$2; shift 2 ;;
+    --state-dir) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; STATE_DIR=$2; shift 2 ;;
+    --env-file) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; ENV_FILE=$2; shift 2 ;;
+    --no-wait) WAIT=0; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) printf 'error: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    *) [ -z "${OFFER_ID:-}" ] || { usage >&2; exit 2; }; OFFER_ID=$1; shift ;;
+  esac
+done
+
+[ -n "${COMPOSE_FILE:-}" ] || { echo 'error: --compose is required' >&2; usage >&2; exit 2; }
+[ -n "${OFFER_ID:-}" ] || { echo 'error: OFFER_ID is required' >&2; usage >&2; exit 2; }
+[ -f "$COMPOSE_FILE" ] || { echo "error: missing Compose file: $COMPOSE_FILE" >&2; exit 1; }
+command -v docker >/dev/null || { echo 'error: docker is required' >&2; exit 1; }
+command -v vastai >/dev/null || { echo 'error: vastai is required' >&2; exit 1; }
+command -v jq >/dev/null || { echo 'error: jq is required' >&2; exit 1; }
+command -v openssl >/dev/null || { echo 'error: openssl is required' >&2; exit 1; }
+
+mkdir -p "$STATE_DIR"
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+compose_args=(-f "$COMPOSE_FILE")
+if [ -z "$ENV_FILE" ] && [ -f "$(dirname "$COMPOSE_FILE")/.env" ]; then
+  ENV_FILE="$(dirname "$COMPOSE_FILE")/.env"
+fi
+[ -z "$ENV_FILE" ] || compose_args+=(--env-file "$ENV_FILE")
+docker compose "${compose_args[@]}" config --format json > "$tmp"
+image=$(jq -er ".services[\"$SERVICE\"].image" "$tmp")
+api_key="${VALIDATION_API_KEY:-$(openssl rand -hex 24)}"
+
+env_spec='-p 22:22 -p 8080:8080'
+while IFS=$'\t' read -r key value; do
+  case "$key" in CHAT_API_KEY|NINFER_ENABLE_SSH|NINFER_API_KEY) continue ;; esac
+  [[ "$value" != *[[:space:]]* ]] || { echo "error: whitespace in Compose environment value $key" >&2; exit 1; }
+  env_spec+=" -e $key=$value"
+done < <(jq -r ".services[\"$SERVICE\"].environment | to_entries[] | [.key, (.value // \"\")] | @tsv" "$tmp")
+env_spec+=" -e NINFER_ENABLE_SSH=1 -e NINFER_API_KEY=$api_key"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf 'vastai create instance %q --image %q --disk %q --label %q --cancel-unavail --env %q --raw --args\n' \
+    "$OFFER_ID" "$image" "$DISK_GB" ninfer-compose-validation \
+    "${env_spec//$api_key/<generated-validation-key>}"
+  exit 0
+fi
+
+created=$(vastai create instance "$OFFER_ID" \
+  --image "$image" --disk "$DISK_GB" --label ninfer-compose-validation \
+  --cancel-unavail --env "$env_spec" --raw --args)
+instance=$(printf '%s' "$created" | jq -er '.new_contract')
+
+umask 077
+printf '%s\n' "$instance" > "$STATE_DIR/.vast-validation-instance"
+printf 'NINFER_API_KEY=%q\n' "$api_key" > "$STATE_DIR/.vast-validation.env"
+printf 'created instance %s\n' "$instance"
+printf 'destroy with: vastai destroy instance %s -y\n' "$instance"
+
+[ "$WAIT" -eq 1 ] || exit 0
+printf 'waiting for mapped API'
+endpoint=
+for _ in $(seq 1 180); do
+  info=$(vastai show instance "$instance" --raw 2>/dev/null || true)
+  status=$(printf '%s' "$info" | jq -r '(if type == "array" then .[0] else (.instances // .) end).actual_status // empty' 2>/dev/null || true)
+  ip=$(printf '%s' "$info" | jq -r '(if type == "array" then .[0] else (.instances // .) end).public_ipaddr // empty' 2>/dev/null || true)
+  port=$(printf '%s' "$info" | jq -r '((if type == "array" then .[0] else (.instances // .) end).ports // {})["8080/tcp"][0].HostPort // empty' 2>/dev/null || true)
+  [ -z "$ip" ] || [ -z "$port" ] || endpoint="http://$ip:$port/v1"
+  if [ -n "$endpoint" ] && curl -fsS --max-time 10 -H "Authorization: Bearer $api_key" "$endpoint/models" >/dev/null 2>&1; then
+    printf '\nready: %s\n' "$endpoint"
+    printf 'NINFER_BASE_URL=%q\n' "$endpoint" >> "$STATE_DIR/.vast-validation.env"
+    printf 'benchmark: ./benchmark-api "$NINFER_BASE_URL" --context PROFILE_CONTEXT\n'
+    exit 0
+  fi
+  [ "$status" != exited ] && [ "$status" != offline ] || break
+  printf '.'; sleep 10
+done
+printf '\nerror: API did not become ready; instance %s is still your responsibility\n' "$instance" >&2
+exit 1

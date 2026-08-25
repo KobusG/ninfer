@@ -1,7 +1,7 @@
 # ninfer
 
-**Prebuilt Linux builds of the NInfer inference engine — the thing upstream doesn't ship — plus a
-single bash script that rents the GPU to run one on and tears it down when you're done.**
+**Runnable NInfer GPU profiles with a shared, model-free Docker build and a bash script that rents
+the GPU to run one on and tears it down when you're done.**
 
 NInfer is a from-scratch C++/CUDA engine that runs a closed set of registered Qwen checkpoints
 faster than a general-purpose runtime does. There are two of them, one per GPU generation, and
@@ -11,7 +11,7 @@ neither publishes what a Linux user actually needs:
 | --- | --- | --- |
 | [Neroued/ninfer](https://github.com/Neroued/ninfer) — the RTX 5090 engine | none, ever | none, ever |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) — the RTX 3090 backport | none since v0.3.1 | prebuilt archive |
-| **this project** | **`sm_86` v0.6.1 · `sm_120a` rev `feaf4dd0`** | — (use upstream) |
+| **this project** | **`sm_86` v0.6.1 · `sm_120a` rev `91fa8c79`** | — (use upstream) |
 
 Both say so themselves. The 3090 fork, in
 [`RELEASE_NOTES_0.6.1.md`](https://github.com/Don-Chad/ninfer-3090/blob/main/RELEASE_NOTES_0.6.1.md):
@@ -41,25 +41,41 @@ If you already own the card, skip the renting entirely — see
 | | `3090/` | `5090/` |
 | --- | --- | --- |
 | Architecture | `sm_86`, Ampere, 24 GB | `sm_120a`, Blackwell, 32 GB |
-| Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` |
+| Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [KobusG/ninfer-engine](https://github.com/KobusG/ninfer-engine) `91fa8c79` |
 | Default model | Qwen3.8-27B `groupwise-int` | Qwen3.8-27B **NVFP4** |
-| Binaries | prebuilt, downloaded in seconds | prebuilt, downloaded in seconds |
+| Rental runtime | prebuilt kit, downloaded in seconds | immutable GHCR entrypoint image, model downloaded at runtime |
 | Typical rent | ~$0.28/hr | ~$0.40–0.95/hr |
-| Compile, if you skip the kit | 883 s at `-j12` | 302 s at `-j128` |
+| Build path | optional rented-host compile | local Docker build, then GHCR publish |
 
 Qwen3.8 NVFP4 is the 5090 default because Blackwell's W4A4 tensor cores materially improve
 concurrent throughput and the 32 GB card can hold the larger artifact. Set
 `NINFER_MODEL=qwen38-27b` for the lower-VRAM groupwise-integer variant used by the constrained
 24 GB profile.
 
+### RTX 5090 profile
+
+`5090/` now uses the same immutable, model-free entrypoint image as the constrained Blackwell
+workflow, pinned by digest. Vast preserves that entrypoint with `runtype=args`, maps SSH and API
+ports directly, and defaults to verified Secure Cloud offers. The Qwen3.8-27B NVFP4 artifact is
+downloaded at runtime and verified against its published SHA-256; rented GPUs never build code.
+
+The production default is 524,288-token explicit `rk4v4-e8` KV/context, concurrency 2, MTP3,
+and Vision 8K. The fully validated 548,864-token profile held 31,904 MiB idle and peaked at
+31,906 MiB on a card reporting 32,607 MiB, but retained only about 42 MiB of NInfer planner margin.
+The 524,288 default gives up 26,944 tokens for roughly 475 MiB more calculated reservation margin.
+The highest successful page-aligned startup was 551,232; the next 64-token page failed.
+A 312,922-token retrieval request passed beyond the old 262K boundary. See
+[`VALIDATION-5090.md`](VALIDATION-5090.md) and the shared [`VALIDATION.md`](VALIDATION.md) for
+reservation, correctness, VRAM, throughput and startup validation.
+
 ### 24 GB Blackwell profile
 
 `rtx6000pro-21gb/` is the Qwen3.8-27B path capped at 21 GiB for 24 GB-class **Blackwell** cards. It requires
 compute capability `sm_120a`; it is not compatible with RTX 6000 Ada or RTX A6000. The model-free
-runtime image is pinned by digest in `rtx6000pro-21gb/ninfer` and downloads the model at provisioning time:
+runtime image is pinned by digest in `rtx6000pro-21gb/ninfer` and downloads the model at runtime:
 
 ```
-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c711bf570c2de3a0ce0815ddb2d6707231507b588c0e845aac044106af0c368d
+ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:d7300f8d8abc3399f8147eecb3f551ee261552309d14730b008955f97e6a9acf
 ```
 
 The default profile is Qwen3.8-27B groupwise-int, `rk4v4-e8` KV, 145,920-token explicit shared
@@ -81,9 +97,8 @@ and the buried code exactly. At that profile C1 decode was 103.0 tok/s and C2 ag
 | `rk4v4-e8` | MTP3 | 18,542 MiB | 95.7-108.2 tok/s | 122.7-128.0 tok/s |
 
 Builds happen locally and are published to GHCR; `rtx6000pro-21gb/ninfer build` deliberately refuses
-to compile on a rented GPU. See [`rtx6000pro-21gb/VALIDATION.md`](rtx6000pro-21gb/VALIDATION.md) for
-the local image build/publish workflow plus image-inference, memory telemetry, throughput and
-long-context validation procedures.
+to compile on a rented GPU. See [`VALIDATION-RTX6000PRO-21GB.md`](VALIDATION-RTX6000PRO-21GB.md) and
+[`VALIDATION.md`](VALIDATION.md) for the profile and shared validation procedures.
 
 Upstream's 3090 notes also mention that their Linux validation ran without a real model artifact,
 so no Linux throughput figures were published. These binaries have been run against the real
@@ -116,13 +131,15 @@ against, and the two cards do not even share an upstream:
 ├── .env.example      credentials template
 └── third_party/      upstream Apache-2.0 license + attribution
 
-5090/                 sm_120a · Blackwell · Neroued/ninfer master
+5090/                 sm_120a · Blackwell · KobusG/ninfer-engine 91fa8c79
 ├── ninfer            the CLI, same shape, different everything else
 ├── .env.example
 └── third_party/
 ```
 
-Each directory is self-contained: the script resolves its own location, so `.env` and
+Each directory is self-contained for deployment state. The Dockerfile, entrypoint and chat
+template are shared under `docker/`; profile build wrappers delegate to that one definition. The
+script resolves its own location, so `.env` and
 `.ninfer-instance` live beside the copy you run, and the two cards never share state. Pick one,
 work in it. Another card would be another sibling.
 
@@ -210,12 +227,10 @@ curl -H "Authorization: Bearer $NINFER_API_KEY" \
 | `ninfer offers` | List the cards worth renting right now. |
 | `ninfer ssh [cmd]` | Shell on the box. |
 | `ninfer log` | Tail the server log. |
-| `ninfer restore` | Reinstall the prebuilt binaries on the current box. |
-| `ninfer kit-url` | Print the URL the kit would be fetched from. |
-| `ninfer provision` | *(5090)* Finish a box that `create` left half-built, instead of renting another. |
-| `ninfer build` | *(5090)* Compile `sm_120a` binaries on the current box from upstream source. |
-| `ninfer kit-pack` | *(5090)* Tar this box's binaries and download the kit to `dist/`. |
-| `ninfer log-build` | *(5090)* Tail the compile log. |
+| `ninfer restore` | *(3090)* Reinstall the prebuilt binaries on the current box. |
+| `ninfer kit-url` | *(3090)* Print the URL the kit would be fetched from. |
+| `ninfer provision` | *(5090)* Resume entrypoint SSH/API readiness checks after an interrupted `create`. |
+| `ninfer build` | *(5090)* Refuse GPU builds and direct replacement-image work to a local machine. |
 | `ninfer bench [C,C,…]` | *(5090)* Measure decode throughput across concurrency levels. |
 
 `create` is `provision` plus renting, so a run that dies late — a timeout, a dropped SSH — can be
@@ -254,11 +269,13 @@ Everything has a sane default and an environment override:
 | `NINFER_INSTANCE` | saved state file | Target a specific instance |
 | `NINFER_MODEL` | `qwen38-nvfp4` | *(5090)* Which registered artifact to serve — see below |
 | `NINFER_PROVIDER` | `ninfer5090` | *(5090)* Provider key written into OpenCode config |
-| `NINFER_KIT_URL` | the published release | Where to fetch the kit |
-| `NINFER_KIT_SHA1` | the published kit's SHA-1 | Blank it to compile from source instead |
-| `NINFER_SRC_BRANCH` | `master` | *(5090)* Upstream branch `ninfer build` compiles |
-| `NINFER_B2_ENV` | *(unset)* | Path to Backblaze B2 credentials, if you host your own copy |
-| `NINFER_KIT_KEY` | *(unset)* | Object key of that private copy |
+| `NINFER_IMAGE` | pinned GHCR digest | *(5090)* Immutable entrypoint runtime |
+| `NINFER_GPU_NAME` | `RTX 5090` | *(5090)* Exact Vast GPU target |
+| `NINFER_SECURE_CLOUD` | `1` | *(5090)* Require Secure Cloud offers |
+| `NINFER_OFFER_RANK` | `2` | *(5090)* Select a bounded sorted offer rank |
+| `NINFER_MAX_CONTEXT` | `524288` | *(5090)* Maximum request context |
+| `NINFER_KV_CAPACITY` | `524288` | *(5090)* Explicit shared KV capacity |
+| `NINFER_KV_DTYPE` | `rk4v4-e8` | *(5090)* Quantized KV representation |
 
 Per-card state lives beside the script and is all gitignored: `.env`, `.ninfer-instance`,
 `.ninfer-badhosts`, and `dist/`.
@@ -295,29 +312,24 @@ client entirely.
 
 ## How provisioning works
 
-`create` rents the box, then hands off to `provision`:
+The 5090 `create` path is:
 
 1. **Pick** — query Vast's bundles API for single-GPU offers with enough disk, ≥1 Gbps down, a new
    enough CUDA, enough VRAM, a reliability floor, and no entry in `.ninfer-badhosts`; take the
    cheapest survivor.
-2. **Rent** — create the instance from `nvidia/cuda:13.1.2-devel-ubuntu24.04` with port 8080 mapped.
-3. **Wait for SSH** — nothing else can happen until the box is reachable.
-4. **Provision** — apt dependencies and the checkpoint pulled from Hugging Face, detached so a
-   dropped connection doesn't kill it, then checksummed.
-5. **Install the binaries** — the prebuilt kit, verified by SHA-1. With `NINFER_KIT_SHA1` blank the
-   5090 compiles from upstream source here instead, which is what happened before a kit existed.
-6. **Wait** — for the model download to land.
-7. **Serve** — launch under a supervisor loop that restarts on crash, wait for HTTP 200, then
-   rewrite client config with the new address.
+2. **Rent** — create from the pinned runtime digest with `runtype=args`, preserving its entrypoint,
+   and map container ports 22 and 8080 directly.
+3. **Entrypoint** — start key-only SSH, download the selected artifact at runtime, verify its
+   SHA-256, and exec `ninfer-serve` with the environment-controlled profile.
+4. **Ready** — wait for authenticated HTTP 200, then rewrite client config with the mapped address.
 
-Steps 4 and 5 run concurrently on the box. Provisioning owns `apt`, and the compile waits on a
-marker file, because two `apt-get` runs at once deadlock on the dpkg lock.
+`5090/provision` only resumes the readiness wait; it does not install packages or compile. The 3090
+retains its older kit-based provisioning path.
 
 ## The prebuilt Linux kits
 
-Both cards install a tarball of binaries — `ninfer` and `ninfer-serve` — rather than compiling on
-the box. That build cost is the entire reason people leave GPU instances running, and the entire
-reason these kits exist.
+Downloadable kits remain available for running on owned cards. The 3090 rental installs its kit;
+the 5090 rental now uses the immutable entrypoint image instead and never compiles on the GPU.
 
 | | 3090 kit | 5090 kit |
 | --- | --- | --- |
@@ -584,7 +596,9 @@ curve rather than a promise about your machine.
 matters: MTP speculative decoding commits two to four tokens per round, so counting SSE deltas
 undercounts decode by roughly 4×.
 
-RTX 5090, Qwen3.6-27B NVFP4, 600 tokens per stream, `int8` KV, MTP-3 with `--lm-head-draft`:
+Legacy published-kit benchmark: RTX 5090, Qwen3.6-27B NVFP4, 600 tokens per stream, `int8` KV,
+MTP-3 with `--lm-head-draft`. The current Qwen3.8 NVFP4 ENTRYPOINT profile is measured separately
+in [`VALIDATION-5090.md`](VALIDATION-5090.md).
 
 | Concurrency | Per-stream tok/s | Aggregate tok/s | MTP tok/round | Acceptance |
 | ---: | ---: | ---: | ---: | ---: |
@@ -636,6 +650,8 @@ This script is only orchestration. The actual inference engine is someone else's
 
 - **[Neroued/ninfer](https://github.com/Neroued/ninfer)** — the RTX 5090 engine, and the upstream high-performance
   single-GPU inference engine (Apache-2.0)
+- **[KobusG/ninfer-engine](https://github.com/KobusG/ninfer-engine)** — the deployed sm120a fork,
+  adding quantized KV, bounded Vision, and extended context (Apache-2.0)
 - **[Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090)** — the RTX 3090 fork these
   binaries are built from, `release/v0.6.0-rtx3090` (Apache-2.0)
 - **[neroued/Qwen3.8-27B-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-NInfer)** — the model

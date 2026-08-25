@@ -3,6 +3,8 @@
 .env
 .ninfer-instance
 .ninfer-badhosts
+.vast-validation.env
+.vast-validation-instance
 
 # --- build output ------------------------------------------------------------
 # Kits produced by 'ninfer kit-pack'. Hundreds of MB; they belong on Releases.

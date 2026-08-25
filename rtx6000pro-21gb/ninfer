@@ -48,7 +48,7 @@ CONFIGS=(
 PROVIDER="${NINFER_PROVIDER:-ninfer6000pro21gb}"
 
 # The default rental target has 24GB-class VRAM like the target VPS.
-IMAGE="${NINFER_IMAGE:-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c711bf570c2de3a0ce0815ddb2d6707231507b588c0e845aac044106af0c368d}"
+IMAGE="${NINFER_IMAGE:-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:d7300f8d8abc3399f8147eecb3f551ee261552309d14730b008955f97e6a9acf}"
 CUDA_MIN=13.1
 DISK_GB="${NINFER_DISK:-80}"
 TARGET_GPU="${NINFER_GPU_NAME:-RTX PRO 4000}"
@@ -63,6 +63,8 @@ SPEC_MODE="${NINFER_SPEC:-mtp}"
 DRAFT_TOKENS="${NINFER_DRAFT_TOKENS:-3}"
 VISION="${NINFER_VISION:-1}"
 VISION_MAX_TOKENS="${NINFER_VISION_MAX_TOKENS:-8192}"
+CHAT_TEMPLATE="${NINFER_CHAT_TEMPLATE:-/usr/share/doc/ninfer/froggeric-chat-template.jinja}"
+REASONING_EFFORT="${NINFER_REASONING_EFFORT:-medium}"
 
 # Upstream accepts a closed set of artifacts and nothing else. These are the
 # supported artifacts, with the size and SHA-256 upstream publishes for
@@ -449,6 +451,7 @@ cmd_create() {
     MODEL_SHA="$MODEL_SHA" API_KEY="$NINFER_API_KEY" KV_DTYPE="$KV_DTYPE" MAX_CONTEXT="$MAX_CONTEXT" \
     KV_CAPACITY="$KV_CAPACITY" MAX_CONCURRENCY="$MAX_CONCURRENCY" PREFILL_CHUNK="$PREFILL_CHUNK" \
     SPEC_MODE="$SPEC_MODE" DRAFT_TOKENS="$DRAFT_TOKENS" VISION="$VISION" VISION_MAX_TOKENS="$VISION_MAX_TOKENS" \
+    CHAT_TEMPLATE="$CHAT_TEMPLATE" REASONING_EFFORT="$REASONING_EFFORT" \
     HF_TOKEN="${HF_TOKEN:-}" python3 - <<'PY'
 import json, os
 env = {
@@ -469,6 +472,8 @@ env = {
     "NINFER_DRAFT_TOKENS": os.environ["DRAFT_TOKENS"],
     "NINFER_VISION": os.environ["VISION"],
     "NINFER_VISION_MAX_TOKENS": os.environ["VISION_MAX_TOKENS"],
+    "NINFER_CHAT_TEMPLATE": os.environ["CHAT_TEMPLATE"],
+    "NINFER_REASONING_EFFORT": os.environ["REASONING_EFFORT"],
 }
 if os.environ.get("HF_TOKEN"):
     env["HF_TOKEN"] = os.environ["HF_TOKEN"]

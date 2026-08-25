@@ -31,15 +31,19 @@ if ! printf '%s  %s\n' "$NINFER_MODEL_SHA256" "$model" | sha256sum --check --sta
   printf '%s  %s\n' "$NINFER_MODEL_SHA256" "$model" | sha256sum --check
 fi
 
+template="${NINFER_CHAT_TEMPLATE:-/usr/share/doc/ninfer/froggeric-chat-template.jinja}"
+[ -f "$template" ] || { echo "missing chat template: $template" >&2; exit 1; }
+
 args=(
   "$model"
   --host 0.0.0.0 --port 8080
+  --chat-template "$template"
+  --reasoning-effort "${NINFER_REASONING_EFFORT:-medium}"
   --max-context "${NINFER_MAX_CONTEXT:-145920}"
   --kv-capacity "${NINFER_KV_CAPACITY:-145920}"
   --kv-dtype "${NINFER_KV_DTYPE:-rk4v4-e8}"
   --max-concurrency "${NINFER_MAX_CONCURRENCY:-2}"
   --prefill-chunk "${NINFER_PREFILL_CHUNK:-512}"
-  --no-thinking
 )
 
 api_key="${NINFER_API_KEY:-${CHAT_API_KEY:-}}"
@@ -48,5 +52,5 @@ api_key="${NINFER_API_KEY:-${CHAT_API_KEY:-}}"
 [ "${NINFER_VISION:-1}" = 1 ] && args+=(--vision --vision-max-tokens "${NINFER_VISION_MAX_TOKENS:-8192}")
 [ "${NINFER_SPEC:-mtp}" = none ] || args+=(--spec "${NINFER_SPEC:-mtp}" --draft-tokens "${NINFER_DRAFT_TOKENS:-3}" --lm-head-draft)
 
-echo "Starting NInfer: model=$NINFER_MODEL_FILE context=${NINFER_MAX_CONTEXT:-145920} kv=${NINFER_KV_DTYPE:-rk4v4-e8} concurrency=${NINFER_MAX_CONCURRENCY:-2}"
+echo "Starting NInfer: model=$NINFER_MODEL_FILE context=${NINFER_MAX_CONTEXT:-145920} kv=${NINFER_KV_DTYPE:-rk4v4-e8} reasoning=${NINFER_REASONING_EFFORT:-medium} concurrency=${NINFER_MAX_CONCURRENCY:-2}"
 exec ninfer-serve "${args[@]}" > >(tee -a /root/serve.log) 2>&1

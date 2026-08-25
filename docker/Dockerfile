@@ -11,16 +11,8 @@ ARG NINFER_REF
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        ca-certificates \
-        cmake \
-        git \
-        libavcodec-dev \
-        libavformat-dev \
-        libavutil-dev \
-        libcurl4-openssl-dev \
-        libswscale-dev \
-        ninja-build \
-        pkg-config \
+        ca-certificates cmake git libavcodec-dev libavformat-dev libavutil-dev \
+        libcurl4-openssl-dev libswscale-dev ninja-build pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -52,13 +44,7 @@ LABEL org.opencontainers.image.source="${NINFER_REPO}" \
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        ca-certificates \
-        curl \
-        ffmpeg \
-        openssh-server \
-        python3 \
-        python3-venv \
-        tini \
+        ca-certificates curl ffmpeg openssh-server python3 python3-venv tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/hf \
@@ -68,7 +54,8 @@ RUN mkdir -p /root/ninfer-5090/build-sm120a/apps /usr/share/doc/ninfer
 COPY --from=build /build/apps/ninfer /root/ninfer-5090/build-sm120a/apps/ninfer
 COPY --from=build /build/apps/ninfer-serve /root/ninfer-5090/build-sm120a/apps/ninfer-serve
 COPY --from=build /src/LICENSE /usr/share/doc/ninfer/LICENSE
-COPY entrypoint /usr/local/bin/ninfer-entrypoint
+COPY docker/entrypoint /usr/local/bin/ninfer-entrypoint
+COPY froggeric-chat-template.jinja /usr/share/doc/ninfer/froggeric-chat-template.jinja
 RUN ln -s /root/ninfer-5090/build-sm120a/apps/ninfer /usr/local/bin/ninfer \
     && ln -s /root/ninfer-5090/build-sm120a/apps/ninfer-serve /usr/local/bin/ninfer-serve \
     && chmod 755 /usr/local/bin/ninfer-entrypoint \

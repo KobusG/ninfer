@@ -7,17 +7,17 @@ services:
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
       NINFER_ENABLE_SSH: "0"
-      NINFER_HF_REPO: neroued/Qwen3.8-27B-NInfer
-      NINFER_MODEL_FILE: qwen3_8_27b.ninfer
-      NINFER_MODEL_SHA256: eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e
+      NINFER_HF_REPO: neroued/Qwen3.8-27B-nvfp4-NInfer
+      NINFER_MODEL_FILE: qwen3_8_27b_nvfp4.ninfer
+      NINFER_MODEL_SHA256: bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32
       NINFER_MODEL_ID: qwen3.8-27b
       NINFER_CHAT_TEMPLATE: /usr/share/doc/ninfer/froggeric-chat-template.jinja
       NINFER_REASONING_EFFORT: medium
-      NINFER_MAX_CONTEXT: "145920"
-      NINFER_KV_CAPACITY: "145920"
+      NINFER_MAX_CONTEXT: "524288"
+      NINFER_KV_CAPACITY: "524288"
       NINFER_KV_DTYPE: rk4v4-e8
       NINFER_MAX_CONCURRENCY: "2"
-      NINFER_PREFILL_CHUNK: "512"
+      NINFER_PREFILL_CHUNK: "1024"
       NINFER_VISION: "1"
       NINFER_VISION_MAX_TOKENS: "8192"
       NINFER_SPEC: mtp
@@ -28,8 +28,8 @@ services:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
       interval: 15s
       timeout: 10s
-      retries: 40
-      start_period: 90s
+      retries: 80
+      start_period: 180s
     restart: unless-stopped
     deploy:
       resources:
