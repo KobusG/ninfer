@@ -168,8 +168,25 @@ The PRO 4000 hardware-max profile leaves only about 1 GiB free and is not the 21
 profile. Keep 145,920 in `.env.example` when the GPU must coexist with the separate 2 GiB workload.
 The current `c711bf57...` image includes direct global block-table lookup, a 1,048,576-token envelope
 and YaRN support from engine commit `b549d912`. Its normal 145,920-token profile passed the Secure
-Cloud smoke test, but contexts above 262,144 have not yet been GPU-validated and are not production
-defaults.
+Cloud smoke test. Extended context was then validated on an RTX PRO 5000 Blackwell using the same
+groupwise-integer model, C2, MTP3, `rk4v4-e8`, Vision 8K and prefill chunk 512:
+
+| KV/context capacity | Idle | Request peak | Prompt | Prefill | Result |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 524,288 | 28,180 MiB | 28,182 MiB | 369,313 tokens | 745.7 tok/s | Exact multimodal needle passed |
+| 1,048,576 | Did not start | - | - | - | Only 3.81 GiB remained before loading 16.95 GiB weights |
+
+The 369,313-token request placed `EXTENDED-524288` in record 18,777, beyond the old 262,144-token
+block-table boundary, and attached the vision fixture. It returned exactly:
+
+```text
+NIFER VISION 731 | EXTENDED-524288
+```
+
+Time to first token was 495.8 seconds, total wall time was 498.4 seconds, decode was 82.5 tok/s,
+and sampled power peaked at 300.7 W. Host available RAM and swap remained unchanged, so no offload
+or host-memory pressure was involved. The 524,288-token setting is a measured PRO 5000 test profile;
+it does not replace the 145,920-token 21 GiB production default.
 
 ## Vision inference
 
