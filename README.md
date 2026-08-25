@@ -42,16 +42,15 @@ If you already own the card, skip the renting entirely — see
 | --- | --- | --- |
 | Architecture | `sm_86`, Ampere, 24 GB | `sm_120a`, Blackwell, 32 GB |
 | Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` |
-| Default model | Qwen3.8-27B `groupwise-int` | Qwen3.6-27B **NVFP4** |
+| Default model | Qwen3.8-27B `groupwise-int` | Qwen3.8-27B **NVFP4** |
 | Binaries | prebuilt, downloaded in seconds | prebuilt, downloaded in seconds |
 | Typical rent | ~$0.28/hr | ~$0.40–0.95/hr |
 | Compile, if you skip the kit | 883 s at `-j12` | 302 s at `-j128` |
 
-NVFP4 is the 5090's default because W4A4 tensor cores are the one thing a 3090 physically cannot
-do. Upstream measures that profile at 1,146.9 aggregate decode tok/s across eight concurrent
-requests — **5.67×** its single-request throughput, where the integer profile manages 2.88×. Set
-`NINFER_MODEL=qwen38-27b` to run the same checkpoint the 3090 runs, if you want the comparison
-without the variable.
+Qwen3.8 NVFP4 is the 5090 default because Blackwell's W4A4 tensor cores materially improve
+concurrent throughput and the 32 GB card can hold the larger artifact. Set
+`NINFER_MODEL=qwen38-27b` for the lower-VRAM groupwise-integer variant used by the constrained
+24 GB profile.
 
 ### 24 GB Blackwell profile
 
@@ -60,7 +59,7 @@ compute capability `sm_120a`; it is not compatible with RTX 6000 Ada or RTX A600
 runtime image is pinned by digest in `rtx6000pro-21gb/ninfer` and downloads the model at provisioning time:
 
 ```
-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c9285445c49e655d0363268e6bcc21cd52b1b4283e7fca2da6c864d4d350cb57
+ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:c711bf570c2de3a0ce0815ddb2d6707231507b588c0e845aac044106af0c368d
 ```
 
 The default profile is Qwen3.8-27B groupwise-int, `rk4v4-e8` KV, 145,920-token explicit shared
@@ -181,14 +180,13 @@ A few minutes later you have an endpoint:
 
 ```
 ready — http://<ip>:<port>/v1
-  model:    qwen3_6_27b_nvfp4.ninfer (17.07 GiB, nvfp4-27b)
-  opencode: pick ninfer5090/qwen3.6-27b
+  model:    qwen3_8_27b_nvfp4.ninfer (20.02 GiB, qwen38-nvfp4)
+  opencode: pick ninfer5090/qwen3.8-27b
   costing $0.4296/hr; 'ninfer destroy' when you're done
 ```
 
 It behaves like any OpenAI-compatible API. **Send the model id the line above printed** — it is
-the artifact's own identity, and the two cards do not share one (`qwen3.6-27b` on the 5090,
-`qwen3.8-27b` on the 3090). `ninfer status` reprints it, and `GET /v1/models` is authoritative:
+the artifact's own identity. `ninfer status` reprints it, and `GET /v1/models` is authoritative:
 
 ```bash
 source .env
@@ -254,7 +252,7 @@ Everything has a sane default and an environment override:
 | `NINFER_SSH_KEY` | `~/.ssh/id_ed25519` | Key used to reach the box |
 | `NINFER_DISK` | `60` (3090) / `80` (5090) | Disk size in GB |
 | `NINFER_INSTANCE` | saved state file | Target a specific instance |
-| `NINFER_MODEL` | `nvfp4-27b` | *(5090)* Which registered artifact to serve — see below |
+| `NINFER_MODEL` | `qwen38-nvfp4` | *(5090)* Which registered artifact to serve — see below |
 | `NINFER_PROVIDER` | `ninfer5090` | *(5090)* Provider key written into OpenCode config |
 | `NINFER_KIT_URL` | the published release | Where to fetch the kit |
 | `NINFER_KIT_SHA1` | the published kit's SHA-1 | Blank it to compile from source instead |
@@ -267,11 +265,12 @@ Per-card state lives beside the script and is all gitignored: `.env`, `.ninfer-i
 
 ### Choosing a model (5090)
 
-Upstream accepts a closed set of artifacts and refuses everything else. Four of them fit in 32 GB:
+Upstream accepts a closed set of artifacts and refuses everything else. Five of them fit in 32 GB:
 
 | `NINFER_MODEL` | Artifact | Size | Note |
 | --- | --- | --- | --- |
-| `nvfp4-27b` *(default)* | Qwen3.6-27B NVFP4 | 17.07 GiB | W4A4 tensor cores; 5.67× at concurrency 8 |
+| `qwen38-nvfp4` *(default)* | Qwen3.8-27B NVFP4/FP8 | 20.02 GiB | Faster concurrent decode; intended for 32 GB Blackwell |
+| `nvfp4-27b` | Qwen3.6-27B NVFP4 | 17.07 GiB | W4A4 tensor cores; 5.67× at concurrency 8 |
 | `int-27b` | Qwen3.6-27B `groupwise-int` | 16.29 GiB | 2.88× at concurrency 8 |
 | `qwen38-27b` | Qwen3.8-27B `groupwise-int` | 16.96 GiB | The same checkpoint the 3090 runs |
 | `moe-35b` | Qwen3.6-35B-A3B | 21.22 GiB | Fastest at concurrency 8; DFlash, text-only |

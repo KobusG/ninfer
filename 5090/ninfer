@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ninfer — run Qwen3.6-27B NVFP4 on a rented Vast.ai RTX 5090, and pay nothing when idle.
+# ninfer — run Qwen3.8-27B NVFP4 on a rented Vast.ai RTX 5090, and pay nothing when idle.
 #
 #   ninfer create   rent a fresh 5090 and provision it from scratch
 #   ninfer provision finish a box that create left half-built
@@ -32,6 +32,8 @@ SELF_DIR=$(cd -P "$(dirname "$_src")" && pwd)
 SELF="$SELF_DIR/${_src##*/}"   # absolute — usage is printed after cd "$PROJ"
 
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
+cd "$PROJ"
+set -a; . ./.env; set +a
 STATE="$PROJ/.ninfer-instance"
 BADHOSTS="$PROJ/.ninfer-badhosts"   # machines that failed to start; skipped by pick_offer
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/kobus}"
@@ -58,23 +60,24 @@ ARGV_FILE=/root/ninfer-argv-new.txt
 SUPERVISE=/root/ninfer-supervise.sh
 
 # Upstream accepts a closed set of artifacts and nothing else. These are the
-# four worth running on 32 GB, with the size and SHA-256 upstream publishes for
-# each. NVFP4 is the default because it is the one thing a 5090 can do that a
-# 3090 physically cannot — W4A4 tensor cores — and it scales 5.67x from one
-# concurrent request to eight, where the int profile manages 2.88x.
-case "${NINFER_MODEL:-qwen38-27b}" in
+# five worth running on 32 GB, with the size and SHA-256 upstream publishes for
+# each. Qwen3.8 NVFP4 is the default because it materially improves concurrent
+# throughput on Blackwell and the 5090 has enough VRAM for the larger artifact.
+case "${NINFER_MODEL:-qwen38-nvfp4}" in
   nvfp4-27b)  HF_REPO=neroued/Qwen3.6-27B-nvfp4-NInfer; HF_FILE=qwen3_6_27b_nvfp4.ninfer
               MODEL_SHA=bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a; MODEL_GIB=17.07 ;;
   int-27b)    HF_REPO=neroued/Qwen3.6-27B-NInfer;       HF_FILE=qwen3_6_27b.ninfer
               MODEL_SHA=7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b; MODEL_GIB=16.29 ;;
   qwen38-27b) HF_REPO=neroued/Qwen3.8-27B-NInfer;       HF_FILE=qwen3_8_27b.ninfer
               MODEL_SHA=eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e; MODEL_GIB=16.96 ;;
+  qwen38-nvfp4) HF_REPO=neroued/Qwen3.8-27B-nvfp4-NInfer; HF_FILE=qwen3_8_27b_nvfp4.ninfer
+                 MODEL_SHA=bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32; MODEL_GIB=20.02 ;;
   moe-35b)    HF_REPO=neroued/Qwen3.6-35B-A3B-NInfer;   HF_FILE=qwen3_6_35b_a3b.ninfer
               MODEL_SHA=1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2; MODEL_GIB=21.22 ;;
-  *) printf 'error: unknown NINFER_MODEL "%s" — pick nvfp4-27b, int-27b, qwen38-27b or moe-35b\n' \
+  *) printf 'error: unknown NINFER_MODEL "%s" — pick nvfp4-27b, int-27b, qwen38-27b, qwen38-nvfp4 or moe-35b\n' \
        "$NINFER_MODEL" >&2; exit 1 ;;
 esac
-MODEL_KEY="${NINFER_MODEL:-qwen38-27b}"
+MODEL_KEY="${NINFER_MODEL:-qwen38-nvfp4}"
 LABEL="ninfer-5090-$MODEL_KEY"
 
 # Prebuilt sm_120a binaries. Upstream ships none — no releases, no tags, and
@@ -86,8 +89,6 @@ KIT_KEY="${NINFER_KIT_KEY:-}"
 KIT_SHA1="${NINFER_KIT_SHA1:-0a7560e3d9c526ef6b6ab1f1ca139a9101a50a6f}"
 KIT_RELEASE_URL="${NINFER_KIT_URL:-https://github.com/coder903/ninfer/releases/download/rtx5090-linux-sm120a-feaf4dd0/ninfer-5090-kit-feaf4dd0983f-sm120a.tar.gz}"
 
-cd "$PROJ"
-set -a; . ./.env; set +a
 : "${VAST_API_KEY:?missing VAST_API_KEY in $PROJ/.env}"
 : "${NINFER_API_KEY:?missing NINFER_API_KEY in $PROJ/.env}"
 

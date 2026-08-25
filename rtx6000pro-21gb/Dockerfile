@@ -55,20 +55,30 @@ RUN apt-get update \
         ca-certificates \
         curl \
         ffmpeg \
+        openssh-server \
         python3 \
         python3-venv \
+        tini \
     && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/hf \
+    && /opt/hf/bin/pip install --no-cache-dir --upgrade pip huggingface_hub
 
 RUN mkdir -p /root/ninfer-5090/build-sm120a/apps /usr/share/doc/ninfer
 COPY --from=build /build/apps/ninfer /root/ninfer-5090/build-sm120a/apps/ninfer
 COPY --from=build /build/apps/ninfer-serve /root/ninfer-5090/build-sm120a/apps/ninfer-serve
 COPY --from=build /src/LICENSE /usr/share/doc/ninfer/LICENSE
+COPY entrypoint /usr/local/bin/ninfer-entrypoint
 RUN ln -s /root/ninfer-5090/build-sm120a/apps/ninfer /usr/local/bin/ninfer \
     && ln -s /root/ninfer-5090/build-sm120a/apps/ninfer-serve /usr/local/bin/ninfer-serve \
+    && chmod 755 /usr/local/bin/ninfer-entrypoint \
+    && printf 'PermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\n' \
+        > /etc/ssh/sshd_config.d/ninfer.conf \
     && printf 'source %s\nrevision %s\narchitecture sm_120a\nCUDA 13.1.2\n' \
-        "$NINFER_REPO" "$NINFER_REF" > /usr/share/doc/ninfer/BUILDINFO
+        "$NINFER_REPO" "$NINFER_REF" > /usr/share/doc/ninfer/BUILDINFO \
+    && rm -f /etc/ssh/ssh_host_*
 
+ENV PATH="/opt/hf/bin:${PATH}"
 WORKDIR /workspace
-EXPOSE 8080
 STOPSIGNAL SIGTERM
-CMD ["ninfer-serve", "--help"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ninfer-entrypoint"]

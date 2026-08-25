@@ -17,9 +17,9 @@ NINFER_VISION=1
 NINFER_VISION_MAX_TOKENS=8192
 ```
 
-The image is pinned in `ninfer` by digest. Context, KV capacity, concurrency, speculation and vision
-budgets are written to the server argv during provisioning, so changing these environment values
-does not require rebuilding the image.
+The image is pinned in `ninfer` by digest. Its entrypoint reads context, KV capacity, concurrency,
+speculation and vision budgets from environment variables, so changing these values does not require
+rebuilding the image.
 
 Copy `.env.example` to `.env`, populate `VAST_API_KEY` and `NINFER_API_KEY`, then run commands
 directly from this directory. The script sources `.env` before resolving the profile, so no variables
@@ -64,13 +64,20 @@ After the push, copy the reported `sha256:` manifest digest into the default `IM
 `ninfer`. Do not deploy a mutable tag. Run the vision, memory, needle and C1/C2 checks below before
 replacing the currently validated digest.
 
-The runtime image includes Python venv support, `curl` and FFmpeg because provisioning downloads the
-registered model from Hugging Face at runtime. It installs binaries at the path expected by
-`ninfer` and also links them into `/usr/local/bin`.
+The runtime image includes the Hugging Face CLI, `curl`, FFmpeg, SSH and `tini`. Its entrypoint
+optionally starts key-only SSH, downloads and verifies the registered model, then replaces itself
+with `ninfer-serve`. SSH host keys are deliberately removed from the image and generated per
+container. Binaries are linked into `/usr/local/bin`.
+
+Vast uses `runtype=args`, which preserves that entrypoint instead of installing Vast's SSH/Jupyter
+bootstrap. Ports 22 and 8080 are explicitly mapped. On the 2026-08-25 Secure Cloud smoke test, Vast
+reached `running` in 50 seconds, entrypoint SSH was ready immediately, and the API was ready 45
+seconds later after downloading the 16.96 GiB model. Total `create` wall time was 129.7 seconds.
 
 ## VPS Docker Compose
 
-`compose.yaml` runs the validated 21 GiB profile directly on an owned `sm_120a` VPS. NInfer's own
+`compose.yaml` uses the same image entrypoint and runs the validated 21 GiB profile directly on an
+owned `sm_120a` VPS. NInfer's own
 authentication is optional and the container port is bound exclusively to host loopback. Leave
 `CHAT_API_KEY` empty when authenticated Caddy is the sole authentication boundary, or set
 it to enable NInfer bearer-token authentication as an additional layer.
@@ -130,12 +137,15 @@ NInfer reserves weights, explicit KV, sequence state, maximum-phase scratch, vis
 CUDA graph allowances at startup. Requests do not intentionally grow these pools, but driver-level
 accounting varied by a few MiB, which is why the request peak, not idle residency, set the limit.
 
+The current entrypoint image was smoke-tested at the same profile on an RTX PRO 4000 Blackwell. It
+held 21,395 MiB both idle and across a 100 ms-sampled real image request, enforced bearer auth,
+returned `391` for `17 * 23`, and returned `NIFER VISION 731 | 3` from the fixture below. The host
+still reported about 229 GiB available RAM, so no host-memory spill was involved.
+
 ## Hardware-max profiles
 
-The same published image was also profiled at the largest context it currently permits. The engine
-has a compiled 262,144-token ceiling, so the RTX 5090 reached the software limit while retaining
-about 8 GiB of VRAM. These profiles use concurrency 2, MTP3, `rk4v4-e8`, Vision 8K and explicit KV
-capacity equal to context.
+The preceding image revision was also profiled at its 262,144-token compiled ceiling. These profiles
+use concurrency 2, MTP3, `rk4v4-e8`, Vision 8K and explicit KV capacity equal to context.
 
 | GPU | Context/KV | Prefill chunk | Idle | Peak | C1 decode | C2 aggregate | Result |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -156,9 +166,10 @@ NIFER VISION 731 | COBALT-8421
 
 The PRO 4000 hardware-max profile leaves only about 1 GiB free and is not the 21 GiB production
 profile. Keep 145,920 in `.env.example` when the GPU must coexist with the separate 2 GiB workload.
-Going beyond 262,144 requires a new engine image containing the reference fork's direct block-table
-lookup, raised context envelope and YaRN changes; spare 5090 VRAM alone cannot bypass this build-time
-limit.
+The current `c711bf57...` image includes direct global block-table lookup, a 1,048,576-token envelope
+and YaRN support from engine commit `b549d912`. Its normal 145,920-token profile passed the Secure
+Cloud smoke test, but contexts above 262,144 have not yet been GPU-validated and are not production
+defaults.
 
 ## Vision inference
 

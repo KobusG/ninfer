@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SOURCE_REPO="${NINFER_SOURCE_REPO:-https://github.com/KobusG/ninfer-engine.git}"
-SOURCE_REF="${NINFER_SOURCE_REF:-775538c646eb2e29928e3c7de1716a33235e7c85}"
+SOURCE_REF="${NINFER_SOURCE_REF:-b549d9127d6e94dd2ca46637e6e155a941a80372}"
 IMAGE="${NINFER_IMAGE_REPOSITORY:-ghcr.io/kobusg/ninfer-sm120a-quant-kv}"
 TAG=
 PUSH=0
@@ -51,8 +51,12 @@ docker run --rm --entrypoint /bin/sh "$IMAGE_REF" -ec '
   test -x /root/ninfer-5090/build-sm120a/apps/ninfer-serve
   test -x /usr/local/bin/ninfer
   test -x /usr/local/bin/ninfer-serve
+  test -x /usr/local/bin/ninfer-entrypoint
+  test -x /usr/sbin/sshd
+  test -x /opt/hf/bin/hf
   test -f /usr/share/doc/ninfer/BUILDINFO
   test -f /usr/share/doc/ninfer/LICENSE
+  ! find /etc/ssh -maxdepth 1 -name "ssh_host_*_key" | grep -q .
 '
 
 printf 'built and layout-checked: %s\n' "$IMAGE_REF"

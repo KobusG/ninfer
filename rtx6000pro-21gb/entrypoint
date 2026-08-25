@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
+if [ "${NINFER_ENABLE_SSH:-0}" = 1 ]; then
+  key="${NINFER_SSH_PUBLIC_KEY:-${SSH_PUBLIC_KEY:-${PUBLIC_KEY:-}}}"
+  [ -n "$key" ] || { echo "SSH enabled but no public key was provided" >&2; exit 1; }
+  install -d -m 700 /root/.ssh /run/sshd
+  printf '%s\n' "$key" > /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  ssh-keygen -A
+  /usr/sbin/sshd
+  echo "SSH listening on container port 22"
+fi
+
+: "${NINFER_HF_REPO:?missing NINFER_HF_REPO}"
+: "${NINFER_MODEL_FILE:?missing NINFER_MODEL_FILE}"
+: "${NINFER_MODEL_SHA256:?missing NINFER_MODEL_SHA256}"
+
+model_dir="${NINFER_MODEL_DIR:-/models}"
+model="$model_dir/$NINFER_MODEL_FILE"
+mkdir -p "$model_dir"
+
+if ! printf '%s  %s\n' "$NINFER_MODEL_SHA256" "$model" | sha256sum --check --status; then
+  rm -f "$model"
+  echo "Downloading $NINFER_HF_REPO/$NINFER_MODEL_FILE"
+  hf download "$NINFER_HF_REPO" "$NINFER_MODEL_FILE" --local-dir "$model_dir"
+  printf '%s  %s\n' "$NINFER_MODEL_SHA256" "$model" | sha256sum --check
+fi
+
+args=(
+  "$model"
+  --host 0.0.0.0 --port 8080
+  --max-context "${NINFER_MAX_CONTEXT:-145920}"
+  --kv-capacity "${NINFER_KV_CAPACITY:-145920}"
+  --kv-dtype "${NINFER_KV_DTYPE:-rk4v4-e8}"
+  --max-concurrency "${NINFER_MAX_CONCURRENCY:-2}"
+  --prefill-chunk "${NINFER_PREFILL_CHUNK:-512}"
+  --no-thinking
+)
+
+api_key="${NINFER_API_KEY:-${CHAT_API_KEY:-}}"
+[ -z "${NINFER_MODEL_ID:-}" ] || args+=(--model-id "$NINFER_MODEL_ID")
+[ -z "$api_key" ] || args+=(--api-key "$api_key")
+[ "${NINFER_VISION:-1}" = 1 ] && args+=(--vision --vision-max-tokens "${NINFER_VISION_MAX_TOKENS:-8192}")
+[ "${NINFER_SPEC:-mtp}" = none ] || args+=(--spec "${NINFER_SPEC:-mtp}" --draft-tokens "${NINFER_DRAFT_TOKENS:-3}" --lm-head-draft)
+
+echo "Starting NInfer: model=$NINFER_MODEL_FILE context=${NINFER_MAX_CONTEXT:-145920} kv=${NINFER_KV_DTYPE:-rk4v4-e8} concurrency=${NINFER_MAX_CONCURRENCY:-2}"
+exec ninfer-serve "${args[@]}" > >(tee -a /root/serve.log) 2>&1
