@@ -15,6 +15,7 @@
 # Nothing about the address is stable: Vast reassigns the public IP, the mapped
 # port and the ssh port on every start, so all three are resolved per call.
 set -euo pipefail
+CALLER_DIR=$(pwd -P)
 
 # Resolve this script's real directory, following symlinks, so a clone works
 # from anywhere and an installed symlink still finds its own .env.
@@ -26,15 +27,14 @@ while [ -L "$_src" ]; do
 done
 SELF_DIR=$(cd -P "$(dirname "$_src")" && pwd)
 SELF="$SELF_DIR/${_src##*/}"   # absolute — usage is printed after cd "$PROJ"
+CONFIGURE_PROJECT=$(cd "$SELF_DIR/.." && pwd)/configure-project
 
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
 STATE="$PROJ/.ninfer-instance"
 BADHOSTS="$PROJ/.ninfer-badhosts"   # machines that failed to start; skipped by pick_offer
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-CONFIGS=(
-  "$HOME/.config/opencode/opencode.json"
-  "$HOME/.config-opencode-ninfer/opencode/opencode.json"
-)
+PROVIDER="${NINFER_PROVIDER:-ninfer}"
+MAX_CONTEXT=65536
 
 # What a fresh box gets built from.
 IMAGE="nvidia/cuda:13.1.2-devel-ubuntu24.04"
@@ -185,27 +185,11 @@ for x in ok[:10]:
         x.get("inet_down") or 0, x.get("geolocation")))'
 }
 
-# --- opencode config --------------------------------------------------------
+# --- project client config --------------------------------------------------
 repoint() {
-  local url="$1" cfg
-  for cfg in "${CONFIGS[@]}"; do
-    [ -f "$cfg" ] || { info "skip (missing): $cfg"; continue; }
-    python3 - "$cfg" "$url" <<'PY'
-import json, sys, collections
-cfg, url = sys.argv[1], sys.argv[2]
-d = json.load(open(cfg), object_pairs_hook=collections.OrderedDict)
-prov = (d.get("provider") or {}).get("ninfer")
-if not prov:
-    print("  no 'ninfer' provider in %s — skipped" % cfg); raise SystemExit
-old = prov.setdefault("options", {}).get("baseURL")
-if old == url:
-    print("  unchanged: %s" % cfg); raise SystemExit
-prov["options"]["baseURL"] = url
-json.dump(d, open(cfg, "w"), indent=2); open(cfg, "a").write("\n")
-print("  updated:   %s" % cfg)
-print("             %s -> %s" % (old, url))
-PY
-  done
+  local url="$1" mid="qwen3.8-27b"
+  "$CONFIGURE_PROJECT" --directory "$CALLER_DIR" --provider "$PROVIDER" \
+    --name "NInfer RTX 3090" --url "$url" --model "$mid" --context "$MAX_CONTEXT"
   python3 - "$url" <<'PY'
 import re, sys
 s = open(".env").read()
@@ -292,7 +276,7 @@ PY
   done
   info "serving (${waited}s)"
 
-  step "re-pointing OpenCode"
+  step "configuring project clients"
   repoint "$url"
   step "ready — $url"
   info "costing \$$(printf '%.4f' "$(field dph_total)")/hr; 'ninfer destroy' when you're done"

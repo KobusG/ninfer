@@ -295,20 +295,23 @@ Upstream accepts a closed set of artifacts and refuses everything else. Five of 
 Each is checked against upstream's published SHA-256 after download. One engine holds one resident
 artifact, so switching models means `destroy` and `create` again.
 
-### OpenCode integration
+### Project-local client integration
 
-If you use [OpenCode](https://opencode.ai), `create` and `up` rewrite your client config so the
-address change after a restart doesn't silently break it. The two cards behave differently, on
-purpose:
+`create` and `up` configure only the directory from which you invoked the script. They never edit
+files under `$HOME/.config`:
 
-- **5090** — owns the provider key `ninfer5090` and **writes the whole block** if it is missing,
-  reading the model id off `GET /v1/models` rather than assuming it. Then pick
-  `ninfer5090/<model-id>` in the TUI. Restart OpenCode; config is read at startup.
-- **3090** — updates the `baseURL` of an existing provider named `ninfer`, and skips a config that
-  doesn't define one.
+- `opencode.json` is created when absent and receives this profile's OpenCode provider and resident
+  model.
+- `.dsh/settings.yaml` receives the equivalent DeepSeek Harness provider.
+- `.dsh/.env` stores `NINFER_API_KEY` with mode `0600`; `.dsh/.gitignore` is updated to ignore it.
 
-Edit the `CONFIGS` array near the top of the script to point at your own files, or at a different
-client entirely.
+The existing unrelated settings in those files are preserved. The provider keys are `ninfer` for
+3090, `ninfer5090` for 5090, and `ninfer6000pro21gb` for the constrained Blackwell profile. Restart
+OpenCode after an endpoint change. Run DeepSeek Harness from the same project with:
+
+```bash
+DSH_HOME="$PWD/.dsh" dsh
+```
 
 ## How provisioning works
 

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+import argparse
+import collections
+import json
+import os
+from pathlib import Path
+
+
+def update_opencode(path, provider, name, url, model, context):
+    data = json.loads(path.read_text(), object_pairs_hook=collections.OrderedDict) if path.exists() else {}
+    providers = data.setdefault("provider", collections.OrderedDict())
+    entry = providers.setdefault(provider, collections.OrderedDict())
+    entry["npm"] = "@ai-sdk/openai-compatible"
+    entry["name"] = name
+    options = entry.setdefault("options", collections.OrderedDict())
+    options["baseURL"] = url
+    options["apiKey"] = "{env:NINFER_API_KEY}"
+    entry["models"] = collections.OrderedDict([
+        (model, collections.OrderedDict([
+            ("name", f"{model} [{name}]"),
+            ("model", model),
+            ("limit", collections.OrderedDict([("context", context), ("output", 8192)])),
+            ("modalities", collections.OrderedDict([
+                ("input", ["text", "image"]),
+                ("output", ["text"]),
+            ])),
+        ])),
+    ])
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"  updated:   {path}")
+    print(f"             provider {provider}/{model} -> {url}")
+
+
+def update_harness(path, provider, name, url, model, context):
+    quoted = lambda value: json.dumps(value, ensure_ascii=True)
+    block = [
+        f"    {provider}:",
+        "      apiKeyEnv: NINFER_API_KEY",
+        "      api: openai-completions",
+        f"      name: {quoted(name)}",
+        f"      baseURL: {quoted(url)}",
+        "      compat:",
+        "        supportsDeveloperRole: false",
+        "        maxTokensField: max_tokens",
+        "      models:",
+        f"        - id: {quoted(model)}",
+        f"          name: {quoted(model + ' [' + name + ']')}",
+        f"          contextWindow: {context}",
+        "          maxTokens: 8192",
+        "          input: [text, image]",
+    ]
+    lines = path.read_text().splitlines() if path.exists() else []
+    indent = lambda line: len(line) - len(line.lstrip(" "))
+    meaningful = lambda line: bool(line.strip()) and not line.lstrip().startswith("#")
+
+    def section_end(start, level):
+        for index in range(start + 1, len(lines)):
+            if meaningful(lines[index]) and indent(lines[index]) <= level:
+                return index
+        return len(lines)
+
+    top = next((i for i, line in enumerate(lines)
+                if indent(line) == 0 and line.strip() == "llm-pi-ai:"), None)
+    if top is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(["llm-pi-ai:", "  providers:", *block])
+    else:
+        top_end = section_end(top, 0)
+        providers = next((i for i in range(top + 1, top_end)
+                          if indent(lines[i]) == 2 and lines[i].strip() == "providers:"), None)
+        if providers is None:
+            lines[top_end:top_end] = ["  providers:", *block]
+        else:
+            providers_end = section_end(providers, 2)
+            current = next((i for i in range(providers + 1, providers_end)
+                            if indent(lines[i]) == 4 and lines[i].strip() == f"{provider}:"), None)
+            if current is None:
+                lines[providers_end:providers_end] = block
+            else:
+                lines[current:section_end(current, 4)] = block
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    env = path.parent / ".env"
+    env_lines = env.read_text().splitlines() if env.exists() else []
+    entry = "NINFER_API_KEY=" + os.environ["NINFER_API_KEY"]
+    env_lines = [entry if line.startswith("NINFER_API_KEY=") else line for line in env_lines]
+    if not any(line.startswith("NINFER_API_KEY=") for line in env_lines):
+        env_lines.append(entry)
+    fd = os.open(env, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write("\n".join(env_lines) + "\n")
+    env.chmod(0o600)
+    ignore = path.parent / ".gitignore"
+    ignored = ignore.read_text().splitlines() if ignore.exists() else []
+    if ".env" not in ignored:
+        ignored.append(".env")
+        ignore.write_text("\n".join(ignored) + "\n")
+    print(f"  updated:   {path}")
+    print(f"             run with DSH_HOME={path.parent}")
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--directory", type=Path, required=True)
+parser.add_argument("--provider", required=True)
+parser.add_argument("--name", required=True)
+parser.add_argument("--url", required=True)
+parser.add_argument("--model", required=True)
+parser.add_argument("--context", type=int, required=True)
+args = parser.parse_args()
+
+if args.context <= 0:
+    parser.error("--context must be positive")
+if not os.environ.get("NINFER_API_KEY"):
+    parser.error("NINFER_API_KEY must be set")
+
+args.directory.mkdir(parents=True, exist_ok=True)
+update_opencode(args.directory / "opencode.json", args.provider, args.name, args.url,
+                args.model, args.context)
+update_harness(args.directory / ".dsh/settings.yaml", args.provider, args.name, args.url,
+               args.model, args.context)

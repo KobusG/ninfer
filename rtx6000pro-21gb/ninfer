@@ -16,6 +16,7 @@
 # Nothing about the address is stable: Vast reassigns the public IP, the mapped
 # port and the ssh port on every start, so all three are resolved per call.
 set -euo pipefail
+CALLER_DIR=$(pwd -P)
 
 # Resolve this script's real directory, following symlinks, so a clone works
 # from anywhere and an installed symlink still finds its own .env.
@@ -27,6 +28,7 @@ while [ -L "$_src" ]; do
 done
 SELF_DIR=$(cd -P "$(dirname "$_src")" && pwd)
 SELF="$SELF_DIR/${_src##*/}"   # absolute — usage is printed after cd "$PROJ"
+CONFIGURE_PROJECT=$(cd "$SELF_DIR/.." && pwd)/configure-project
 
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
 cd "$PROJ"
@@ -38,10 +40,6 @@ set -a; . "$ENV_FILE"; set +a
 STATE="$PROJ/.ninfer-instance"
 BADHOSTS="$PROJ/.ninfer-badhosts"   # machines that failed to start; skipped by pick_offer
 SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/kobus}"
-CONFIGS=(
-  "$HOME/.config/opencode/opencode.json"
-  "$HOME/.config-opencode-ninfer/opencode/opencode.json"
-)
 # Which provider key in those configs this card owns. Separate from the 3090's
 # "ninfer" entry on purpose: the two serve different artifacts under different
 # model ids, and only one is ever live.
@@ -236,53 +234,15 @@ if not ok: print("  none right now — compatible CUDA 13.1+ low-VRAM boxes are 
   info "automatic selection rank: $OFFER_RANK"
 }
 
-# --- opencode config --------------------------------------------------------
+# --- project client config --------------------------------------------------
 repoint() {
-  local url="$1" mid="${2:-}" cfg
-  for cfg in "${CONFIGS[@]}"; do
-    [ -f "$cfg" ] || { info "skip (missing): $cfg"; continue; }
-    PROVIDER="$PROVIDER" python3 - "$cfg" "$url" "$mid" "$MAX_CONTEXT" <<'PY'
-import json, sys, os, collections
-cfg, url, mid, max_context = sys.argv[1:5]
-key = os.environ["PROVIDER"]
-d = json.load(open(cfg), object_pairs_hook=collections.OrderedDict)
-provs = d.setdefault("provider", collections.OrderedDict())
-fresh = key not in provs
-prov = provs.setdefault(key, collections.OrderedDict())
-
-prov["npm"] = "@ai-sdk/openai-compatible"
-prov.setdefault("name", "NInfer RTX6000 Pro 21GB")
-opts = prov.setdefault("options", collections.OrderedDict())
-old = opts.get("baseURL")
-opts["baseURL"] = url
-opts.setdefault("apiKey", "{env:NINFER_API_KEY}")
-
-# One engine holds one resident artifact, so any other model id listed here is
-# left over from a run with a different NINFER_MODEL and would only ever 400.
-models = prov.setdefault("models", collections.OrderedDict())
-if mid and list(models) != [mid]:
-    models.clear()
-    models[mid] = collections.OrderedDict([
-        ("name", "%s [NInfer RTX6000 Pro 21GB]" % mid),
-        ("model", mid),
-        ("limit", collections.OrderedDict([("context", int(max_context)), ("output", 8192)])),
-    ])
-
-json.dump(d, open(cfg, "w"), indent=2); open(cfg, "a").write("\n")
-if fresh:
-    print("  created:   %s" % cfg)
-    print("             provider %r -> %s" % (key, url))
-elif old != url:
-    print("  updated:   %s" % cfg)
-    print("             %s -> %s" % (old, url))
-else:
-    print("  unchanged: %s" % cfg)
-if mid:
-    print("             model %s/%s" % (key, mid))
-else:
-    print("             server named no model - set one by hand")
-PY
-  done
+  local url="$1" mid="${2:-}"
+  if [ -n "$mid" ]; then
+    "$CONFIGURE_PROJECT" --directory "$CALLER_DIR" --provider "$PROVIDER" \
+      --name "NInfer RTX6000 Pro 21GB" --url "$url" --model "$mid" --context "$MAX_CONTEXT"
+  else
+    info "server named no model - project client config skipped"
+  fi
   python3 - "$url" "$ENV_FILE" <<'PY'
 import re, sys
 s = open(sys.argv[2]).read()
@@ -329,7 +289,7 @@ ensure_serving() {
   done
   info "serving (${waited}s)"
 
-  step "re-pointing OpenCode"
+  step "configuring project clients"
   local mid; mid=$(served_model "$url")
   repoint "$url" "$mid"
   step "ready — $url"
