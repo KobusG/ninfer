@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -P "$ROOT/.." && pwd)
 SOURCE_REPO="${NINFER_SOURCE_REPO:-https://github.com/KobusG/ninfer-engine.git}"
-SOURCE_REF="${NINFER_SOURCE_REF:-91fa8c79f1634d172063b1a4eb979d6bd1bd077e}"
+SOURCE_REF="${NINFER_SOURCE_REF:-27b24bae4d63633a0f8681ef9b5cc253fd964bf1}"
 IMAGE="${NINFER_IMAGE_REPOSITORY:-ghcr.io/kobusg/ninfer-sm120a-quant-kv}"
 TAG=
 PUSH=0

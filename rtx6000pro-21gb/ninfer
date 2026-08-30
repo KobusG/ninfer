@@ -33,7 +33,13 @@ CONFIGURE_PROJECT=$(cd "$SELF_DIR/.." && pwd)/configure-project
 PROJ="${NINFER_PROJ:-$SELF_DIR}"
 cd "$PROJ"
 ENV_FILE="${NINFER_ENV_FILE:-$PROJ/.env}"
+declare -A ENV_OVERRIDES=()
+while IFS='=' read -r key value; do
+  case "$key" in NINFER_*|VAST_API_KEY|HF_TOKEN) ENV_OVERRIDES["$key"]=$value ;; esac
+done < <(env)
 set -a; . "$ENV_FILE"; set +a
+for key in "${!ENV_OVERRIDES[@]}"; do export "$key=${ENV_OVERRIDES[$key]}"; done
+unset ENV_OVERRIDES key value
 : "${VAST_API_KEY:?missing VAST_API_KEY in $ENV_FILE}"
 : "${NINFER_API_KEY:?missing NINFER_API_KEY in $ENV_FILE}"
 
@@ -46,7 +52,7 @@ SSH_KEY="${NINFER_SSH_KEY:-$HOME/.ssh/kobus}"
 PROVIDER="${NINFER_PROVIDER:-ninfer6000pro21gb}"
 
 # The default rental target has 24GB-class VRAM like the target VPS.
-IMAGE="${NINFER_IMAGE:-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:d7300f8d8abc3399f8147eecb3f551ee261552309d14730b008955f97e6a9acf}"
+IMAGE="${NINFER_IMAGE:-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:e7f5dbdd202bef2ac8fa48bef28584cae3a6fc6b5f513fef0e49bd280a2e1ae3}"
 CUDA_MIN=13.1
 DISK_GB="${NINFER_DISK:-80}"
 TARGET_GPU="${NINFER_GPU_NAME:-RTX PRO 4000}"
@@ -76,9 +82,13 @@ case "${NINFER_MODEL:-qwen38-27b}" in
               MODEL_SHA=eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e; MODEL_GIB=16.96 ;;
   qwen38-nvfp4) HF_REPO=neroued/Qwen3.8-27B-nvfp4-NInfer; HF_FILE=qwen3_8_27b_nvfp4.ninfer
                  MODEL_SHA=bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32; MODEL_GIB=20.02 ;;
+  qwen38-quasar) HF_REPO=MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4-NInfer; HF_FILE=qwen3_8_27b_nvfp4.ninfer
+                  MODEL_SHA=931816373707010b03e6e4dcba10f5265c3e820584dacd0eb2c6039e397045cd; MODEL_GIB=16.35 ;;
+  qwen38-nvfp4full) HF_REPO=cometkim/Qwen3.8-27B-nvfp4full-NInfer; HF_FILE=qwen3_8_27b_nvfp4full.ninfer
+                     MODEL_SHA=2f59cc27d67cb7acba0ba8a0e0881ac89c1db2b267a60119a696fefa12faf4e7; MODEL_GIB=17.07 ;;
   moe-35b)    HF_REPO=neroued/Qwen3.6-35B-A3B-NInfer;   HF_FILE=qwen3_6_35b_a3b.ninfer
               MODEL_SHA=1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2; MODEL_GIB=21.22 ;;
-  *) printf 'error: unknown NINFER_MODEL "%s" — pick nvfp4-27b, int-27b, qwen38-27b, qwen38-nvfp4 or moe-35b\n' \
+  *) printf 'error: unknown NINFER_MODEL "%s" — pick nvfp4-27b, int-27b, qwen38-27b, qwen38-nvfp4, qwen38-quasar, qwen38-nvfp4full or moe-35b\n' \
        "$NINFER_MODEL" >&2; exit 1 ;;
 esac
 MODEL_KEY="${NINFER_MODEL:-qwen38-27b}"
@@ -117,7 +127,7 @@ api_set_state() {
 field() {
   api_get | INFO_KEY="$1" python3 -c '
 import sys, json, os
-d = json.load(sys.stdin)["instances"]
+d = json.load(sys.stdin)["instances"] or {}
 v = d.get(os.environ["INFO_KEY"])
 print("" if v is None else v)'
 }
@@ -477,7 +487,7 @@ cmd_destroy() {
   need_instance
   local s; s=$(field actual_status 2>/dev/null || echo unknown)
   step "destroying instance $INSTANCE (currently $s)"
-  info "this deletes the disk — the ${MODEL_GIB} GiB model will be re-downloaded next time"
+  info "this deletes the disk — the selected model will be re-downloaded next time"
   curl -fsS -X DELETE -H "Authorization: Bearer $VAST_API_KEY" "$API_BASE/instances/${INSTANCE}/" >/dev/null
   # only forget the saved id if that is the one we just deleted — a
   # NINFER_INSTANCE override must not clear the tracked instance

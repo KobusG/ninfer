@@ -1,6 +1,6 @@
 services:
   qwen:
-    image: ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:d7300f8d8abc3399f8147eecb3f551ee261552309d14730b008955f97e6a9acf
+    image: ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:e7f5dbdd202bef2ac8fa48bef28584cae3a6fc6b5f513fef0e49bd280a2e1ae3
     ports:
       - "127.0.0.1:8080:8080"
     environment:

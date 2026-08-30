@@ -11,7 +11,7 @@ neither publishes what a Linux user actually needs:
 | --- | --- | --- |
 | [Neroued/ninfer](https://github.com/Neroued/ninfer) — the RTX 5090 engine | none, ever | none, ever |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) — the RTX 3090 backport | none since v0.3.1 | prebuilt archive |
-| **this project** | **`sm_86` v0.6.1 · `sm_120a` rev `91fa8c79`** | — (use upstream) |
+| **this project** | **`sm_86` v0.6.1 · `sm_120a` rev `27b24bae`** | — (use upstream) |
 
 Both say so themselves. The 3090 fork, in
 [`RELEASE_NOTES_0.6.1.md`](https://github.com/Don-Chad/ninfer-3090/blob/main/RELEASE_NOTES_0.6.1.md):
@@ -41,7 +41,7 @@ If you already own the card, skip the renting entirely — see
 | | `3090/` | `5090/` |
 | --- | --- | --- |
 | Architecture | `sm_86`, Ampere, 24 GB | `sm_120a`, Blackwell, 32 GB |
-| Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [KobusG/ninfer-engine](https://github.com/KobusG/ninfer-engine) `91fa8c79` |
+| Engine | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) v0.6.1 | [KobusG/ninfer-engine](https://github.com/KobusG/ninfer-engine) `27b24bae` |
 | Default model | Qwen3.8-27B `groupwise-int` | Qwen3.8-27B **NVFP4** |
 | Rental runtime | prebuilt kit, downloaded in seconds | immutable GHCR entrypoint image, model downloaded at runtime |
 | Typical rent | ~$0.28/hr | ~$0.40–0.95/hr |
@@ -75,7 +75,7 @@ compute capability `sm_120a`; it is not compatible with RTX 6000 Ada or RTX A600
 runtime image is pinned by digest in `rtx6000pro-21gb/ninfer` and downloads the model at runtime:
 
 ```
-ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:d7300f8d8abc3399f8147eecb3f551ee261552309d14730b008955f97e6a9acf
+ghcr.io/kobusg/ninfer-sm120a-quant-kv@sha256:e7f5dbdd202bef2ac8fa48bef28584cae3a6fc6b5f513fef0e49bd280a2e1ae3
 ```
 
 The default profile is Qwen3.8-27B groupwise-int, `rk4v4-e8` KV, 145,920-token explicit shared
@@ -131,7 +131,7 @@ against, and the two cards do not even share an upstream:
 ├── .env.example      credentials template
 └── third_party/      upstream Apache-2.0 license + attribution
 
-5090/                 sm_120a · Blackwell · KobusG/ninfer-engine 91fa8c79
+5090/                 sm_120a · Blackwell · KobusG/ninfer-engine 27b24bae
 ├── ninfer            the CLI, same shape, different everything else
 ├── .env.example
 └── third_party/

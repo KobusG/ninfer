@@ -17,6 +17,19 @@ retrieval, but that is a hardware-capacity test and not the 21 GiB profile. On t
 prefill512 is required for very long prefills; prefill1024 can fail with
 `cudaErrorCooperativeLaunchTooLarge`. Its constrained profile measured about 21,395 MiB.
 
+Alternate NVFP4 artifacts were tested on an RTX PRO 4000 with the same 145,920-token, C2, MTP3,
+Vision8K and `rk4v4-e8` profile:
+
+| Model selection | Artifact | GPU used | C1 | C2 aggregate | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `qwen38-quasar` | 16.35 GiB | 20,769 MiB | 70.0 tok/s | 137.6 tok/s | arithmetic and vision passed |
+| `qwen38-nvfp4full` | 17.07 GiB | 21,503 MiB | 65.0 tok/s | 118.0 tok/s | arithmetic and vision passed |
+
+QUASAR is the practical NVFP4 option for a 24 GB card: it leaves about 735 MiB beneath the 21 GiB
+NInfer ceiling. `nvfp4full` is technically inside that ceiling by 1 MiB in this sample and therefore
+has no useful safety margin. The groupwise-int profile remains the default because its quality is
+better established; the QUASAR model card describes narrower validation coverage.
+
 Use the root `validate-vast` and `benchmark-api` scripts with `--context 145920`. The model,
 tokenizer, chat template and vision resources are embedded in the `.ninfer` artifact; no separate
 mmproj file is required.
