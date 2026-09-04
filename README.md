@@ -143,10 +143,39 @@ script resolves its own location, so `.env` and
 `.ninfer-instance` live beside the copy you run, and the two cards never share state. Pick one,
 work in it. Another card would be another sibling.
 
+### Split Python interface
+
+The root Python interface deliberately separates marketplace work from operating a paid instance:
+
+```bash
+# Print one selected offer ID. This never rents anything.
+./ninfer-find 5090
+
+# Creation owns the image, model and runtime configuration.
+./ninfer create $(./ninfer-find 5090) --profile 5090 --model qwen38-quasar
+
+# Create prints an instance ID and returns immediately.
+./ninfer wait
+./ninfer status
+./ninfer bench --tokens 128
+./ninfer ssh
+./ninfer destroy
+```
+
+`ninfer-find` writes only the offer ID to stdout, so it is safe to use in command substitution.
+`ninfer create` saves the returned contract ID in `.ninfer-instance` in the directory where it was
+invoked. Subsequent commands use that file automatically. If it is absent, they use the account's
+only Vast instance; if several instances exist, pass the instance ID explicitly.
+`ninfer` queries existing instances through the Vast Python SDK and infers `5090`, `3090`, or the
+constrained Blackwell profile from this project's label and the reported GPU. Use `--profile` only
+for an unknown GPU. The legacy 3090 kit still needs `3090/ninfer create`; an already-provisioned
+3090 instance can be operated by the root `ninfer` command.
+
 ## Requirements
 
 - A [Vast.ai](https://vast.ai) account with credit and an SSH key registered on it
 - `bash`, `curl`, `python3`, `ssh` (macOS or Linux)
+- The Vast Python SDK for the root interface: `pip install vastai` (the standalone Vast CLI installer also includes it)
 - An SSH keypair at `~/.ssh/id_ed25519` (override with `NINFER_SSH_KEY`)
 
 Nothing needs to be installed on your machine beyond that — no CUDA, no Python packages, no

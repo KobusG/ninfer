@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Create and operate Vast NInfer instances."""
+
+import argparse
+from pathlib import Path
+
+from ninferlib import (
+    MODELS,
+    PROFILE_ALIASES,
+    ContextManager,
+    VastClient,
+    cmd_bench,
+    cmd_destroy,
+    cmd_down,
+    cmd_log,
+    cmd_ssh,
+    cmd_status,
+    cmd_up,
+    context_args,
+    credential,
+    ensure_serving,
+    infer_model,
+    infer_profile,
+    instance_overrides,
+    rent_instance,
+    resolve_instance_id,
+    wait_for_ssh,
+    wait_for_status,
+)
+
+
+def add_connection_args(p: argparse.ArgumentParser, require_profile: bool = False) -> None:
+    p.add_argument("--profile", required=require_profile, choices=PROFILE_ALIASES)
+    p.add_argument("--model", choices=MODELS)
+    p.add_argument("--vast-api-key")
+    p.add_argument("--ninfer-api-key")
+    p.add_argument("--ssh-key")
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    create = sub.add_parser("create", help="Create a configured instance from an offer ID")
+    create.add_argument("offer_id", type=int)
+    add_connection_args(create, require_profile=True)
+    create.add_argument("--disk", type=int)
+    create.add_argument("--context", type=int)
+    create.add_argument("--kv-capacity", type=int)
+    create.add_argument("--concurrency", type=int)
+    create.add_argument("--prefill-chunk", type=int)
+    create.add_argument("--kv-dtype")
+    create.add_argument("--spec")
+    create.add_argument("--draft-tokens", type=int)
+    create.add_argument("--vision", type=int, choices=(0, 1))
+    create.add_argument("--vision-tokens", type=int)
+    create.add_argument("--chat-template")
+    create.add_argument("--reasoning-effort")
+    create.add_argument("--image")
+
+    for command in ("wait", "status", "up", "down", "stop", "destroy", "rm", "log"):
+        command_parser = sub.add_parser(command)
+        command_parser.add_argument("instance_id", nargs="?")
+        add_connection_args(command_parser)
+
+    ssh = sub.add_parser("ssh")
+    ssh.add_argument("instance_id", nargs="?")
+    add_connection_args(ssh)
+    ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
+    bench = sub.add_parser("bench")
+    bench.add_argument("instance_id", nargs="?")
+    add_connection_args(bench)
+    bench.add_argument("concurrency", nargs="?", default="1,2")
+    bench.add_argument("--tokens", type=int, default=128)
+    return p
+
+
+def main() -> None:
+    args = parser().parse_args()
+
+    if args.command == "create":
+        ctx = ContextManager(args.profile, args)
+        ctx.state_file = ctx.caller_dir / ".ninfer-instance"
+        rent_instance(ctx, args.offer_id)
+        return
+
+    vast_key = args.vast_api_key or credential("VAST_API_KEY", args.profile)
+    if not vast_key:
+        raise SystemExit("error: missing VAST_API_KEY")
+    vast = VastClient(vast_key)
+    args.instance_id = resolve_instance_id(
+        vast, args.instance_id, Path.cwd().resolve() / ".ninfer-instance"
+    )
+    info = vast.get_instance(args.instance_id)
+    if not info:
+        raise SystemExit(f"error: Vast instance {args.instance_id} was not found")
+
+    profile = PROFILE_ALIASES[args.profile] if args.profile else infer_profile(info)
+    model = args.model or infer_model(info, profile)
+    runtime = instance_overrides(info)
+    runtime.update(
+        instance=args.instance_id,
+        model=model,
+        vast_api_key=vast_key,
+        ninfer_api_key=args.ninfer_api_key,
+        ssh_key=args.ssh_key,
+    )
+    ctx = ContextManager(
+        profile,
+        context_args(**runtime),
+    )
+    ctx.state_file = ctx.caller_dir / ".ninfer-instance"
+
+    if args.command == "wait":
+        wait_for_status(ctx, "running")
+        wait_for_ssh(ctx)
+        ensure_serving(ctx)
+    elif args.command == "status":
+        cmd_status(ctx)
+    elif args.command == "up":
+        cmd_up(ctx)
+    elif args.command in ("down", "stop"):
+        cmd_down(ctx)
+    elif args.command in ("destroy", "rm"):
+        cmd_destroy(ctx)
+    elif args.command == "ssh":
+        cmd_ssh(ctx, args.ssh_args)
+    elif args.command == "log":
+        cmd_log(ctx)
+    elif args.command == "bench":
+        cmd_bench(ctx, args.concurrency, args.tokens)
+
+
+if __name__ == "__main__":
+    main()
